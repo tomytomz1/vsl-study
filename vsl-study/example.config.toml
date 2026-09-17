@@ -1,0 +1,15 @@
+# Example settings for VSL Study.
+# Pass the same values as CLI flags or set them in the local Streamlit UI.
+# This file is documentation; the CLI does not auto-load it unless you copy the flags.
+
+model = "small.en"          # default English model; use base.en for a faster CPU run
+language = "en"             # transcribe in the original language; do not translate by default
+task = "transcribe"         # "transcribe" or "translate" (translate requires a multilingual model)
+detector = "adaptive"       # adaptive | content
+interval = 5.0              # seconds between backup screenshots
+scene_start_offset = 0.25   # seconds after each scene start, clamped inside the scene
+max_width = 1280            # screenshot max width in pixels; aspect ratio is preserved
+ocr = true                  # on-screen text from screenshots (RapidOCR; Tesseract optional)
+context_window_s = 2.0      # match screenshots to nearby transcript segments
+compact_view = true         # sequential similar-image compact view (keeps references)
+include_media = false       # include temp audio in the ZIP

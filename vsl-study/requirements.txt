@@ -1,0 +1,11 @@
+# Verified on Windows with Python 3.11.9 (2026-09-17).
+# Install CPU torch first, then: pip install -e ".[dev]"
+# torch==2.14.0+cpu  (from https://download.pytorch.org/whl/cpu)
+
+openai-whisper==20250625
+scenedetect==0.7.1
+streamlit==1.63.0
+pillow==11.3.0
+pytesseract==0.3.13
+rapidocr-onnxruntime==1.4.4
+numpy==2.4.6

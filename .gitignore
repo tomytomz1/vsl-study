@@ -1,0 +1,35 @@
+# Python
+.venv/
+venv/
+__pycache__/
+*.py[cod]
+*.egg-info/
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+dist/
+build/
+
+# VSL Study outputs and media
+output/
+**/output/
+*.mp4
+*.mov
+*.mkv
+*.webm
+*.wav
+*.zip
+*.srt
+
+# Model downloads and caches
+.cache/
+**/whisper_cache/
+**/.whisper/
+**/models/
+
+# OS / editor
+.DS_Store
+Thumbs.db
+.idea/
+.vscode/
+*.log

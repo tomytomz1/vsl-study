@@ -1,0 +1,172 @@
+# VSL Study
+
+Local Python tool that turns a **video sales letter you already have** into a timestamped transcript, real screenshots, and a portable evidence package. It prepares evidence. It does not generate unsupported marketing analysis, download videos, or call a cloud AI.
+
+Default English model: **`small.en`**. Faster CPU option: **`base.en`**.
+
+## What you get
+
+Each job folder contains:
+
+- `transcript.txt`, `transcript_timestamped.txt`, `transcript.srt`, `transcript.json`
+- `onscreen.txt`, `ocr.json` — on-screen text from screenshots, kept separate from speech
+- `scenes.csv`, `manifest.json`
+- `frames/` — actual JPEG captures (IDs and times in the filename)
+- `contact_sheets/` — navigation thumbnails; labels sit in the **margin**, not on the screenshot
+- `report.html` — searchable offline timeline (relative images, no remote scripts)
+- `report.md` — portable Markdown with relative image paths
+- `ai_study_prompt.md` — reusable analysis instructions (no API call)
+- `evidence_5min/` — chronological 5-minute slices for models with image/context limits
+- `vsl_study_evidence.zip` — the package without the original video or temp audio (unless you ask)
+
+**A Markdown image path or a ZIP upload does not mean an AI inspected the images.** Attach the relevant `frames/` files with the matching transcript, or use a workflow that actually opens the archive and pixels. Upload limits differ by product; this tool does not claim compatibility with any particular limit.
+
+## Requirements
+
+- **Python 3.11** (Whisper’s supported range is 3.8–3.11; 3.12+ is not used here)
+- **FFmpeg and ffprobe** on `PATH`
+- Optional: **Tesseract** as an extra OCR fallback. RapidOCR ships with the Python package and does not need a PATH install. Missing OCR does not block transcription or screenshots.
+
+CPU transcription is normal. It is **not real-time**. A long VSL on CPU with `small.en` can take much longer than the video duration. There is no NVIDIA GPU requirement; CUDA is used only when PyTorch reports it is available.
+
+### FFmpeg
+
+- Windows: [gyan.dev builds](https://www.gyan.dev/ffmpeg/builds/), Chocolatey `choco install ffmpeg`, or Scoop `scoop install ffmpeg`
+- macOS: `brew install ffmpeg`
+- Debian/Ubuntu: `sudo apt update && sudo apt install ffmpeg`
+
+Confirm:
+
+```bash
+ffmpeg -version
+ffprobe -version
+```
+
+### On-screen OCR
+
+VSLs put prices, headlines, and CTAs on the video. OCR is **on by default**. It reads each screenshot with RapidOCR (bundled models) and falls back to Tesseract when that binary is installed. Results go in `onscreen.txt` and `ocr.json`, and are copied into each `evidence_5min/` folder. They stay separate from the Whisper transcript.
+
+Tesseract is optional. If you already have it, the app finds `tesseract.exe` even when it is not on PATH (typical Windows install: `C:\Program Files\Tesseract-OCR\`).
+
+- Windows: [UB-Mannheim installer](https://github.com/UB-Mannheim/tesseract/wiki) or `winget install --id UB-Mannheim.TesseractOCR -e`
+- macOS: `brew install tesseract`
+- Debian/Ubuntu: `sudo apt install tesseract-ocr`
+
+Use `--no-ocr` (CLI) or uncheck the OCR box (app) to skip.
+
+## Setup
+
+### Windows PowerShell
+
+```powershell
+cd "vsl-study"
+py -3.11 -m venv .venv
+.\.venv\Scripts\Activate.ps1
+python -m pip install --upgrade pip
+python -m pip install torch --index-url https://download.pytorch.org/whl/cpu
+python -m pip install -e ".[dev]"
+python -m vsl_study doctor
+```
+
+If `py -3.11` is missing: `winget install --id Python.Python.3.11 -e`
+
+### macOS / Linux
+
+```bash
+cd vsl-study
+python3.11 -m venv .venv
+source .venv/bin/activate
+python -m pip install --upgrade pip
+python -m pip install torch --index-url https://download.pytorch.org/whl/cpu
+python -m pip install -e ".[dev]"
+python -m vsl_study doctor
+```
+
+The first Whisper run **downloads model weights** into the library cache (often `~/.cache/whisper`). After that, core processing does not need the network.
+
+## Use it like a normal Windows app
+
+You do not need Cursor, a terminal, or a browser.
+
+1. Double-click **VSL Study** on your Desktop or in the Start menu (or `Launch VSL Study.cmd` in this folder).
+2. Click **Browse…** next to **Video** and pick the MP4/MOV/MKV/WebM file in the normal Windows file window.
+3. Click **Browse…** next to **Save to** and pick (or create) the folder for the evidence package. If you only pick a video, a folder named `<video>-vsl-study` is suggested beside it.
+4. Click **Run**. Watch the log. When it finishes, use **Open save folder** or **Open report**.
+5. Close the window to quit.
+
+The same pipeline still works from the command line if you prefer. `python -m vsl_study ui` is an optional browser UI and is not required.
+
+## Commands
+
+```bash
+python -m vsl_study doctor
+python -m vsl_study process --input "C:/Videos/yu-sleep.mp4" --output "./output/yu-sleep" --model small.en --language en --interval 5
+python -m vsl_study frames --job "./output/yu-sleep" --at 00:02:15.500 00:17:40
+python -m vsl_study ui
+```
+
+`ui` binds Streamlit to **127.0.0.1**. Prefer a **file path on the computer running the app** for large screen recordings. Upload is optional and capped at **100 MB**.
+
+If Streamlit asks for an email on first launch, leave it blank or use the project `.streamlit/credentials.toml` already in this repo. `python -m vsl_study ui` starts headless so that prompt is skipped.
+
+### First Yu Sleep VSL
+
+Put your local recording on disk, then:
+
+```powershell
+python -m vsl_study process --input "PATH\TO\yu-sleep.mp4" --output ".\output\yu-sleep" --model small.en --language en --interval 5
+```
+
+Nothing in the code is hardcoded to Yu Sleep. Any local MP4/MOV/MKV/WebM with decodable streams works.
+
+### Useful flags
+
+| Flag | Meaning |
+| --- | --- |
+| `--model base.en` | Faster, lower-quality English CPU run |
+| `--model small` / `--language es` | Multilingual model + original language (not `.en`) |
+| `--task translate` | English translation; requires a multilingual model (not `.en`, not `turbo`) |
+| `--detector content` | Fixed-threshold cuts instead of adaptive |
+| `--ocr` / `--no-ocr` | On-screen text from screenshots (default on). Stored separately from speech |
+| `--include-media` | Put extracted WAV in the ZIP |
+| `--device cpu` | Force CPU even if CUDA exists |
+
+## How timestamps stay honest
+
+- The original file is never overwritten.
+- Audio is extracted to 16 kHz mono WAV and **silence-padded** when the audio stream starts after the video, so Whisper seconds match playback time.
+- Screenshots are real decoded frames. Requested vs actual capture times are both stored. Labels are captions, not burned-in text.
+- Scene detection uses PySceneDetect 0.7.1 (`AdaptiveDetector` by default, `get_scene_list(start_in_scene=True)` so a no-cut video is one scene).
+- Screenshot times use ffmpeg presentation timestamps, not `frame_index / average_fps`. On **variable frame rate**, scene *boundary* seconds from PySceneDetect still follow the decoder time base and can differ slightly; capture actual times remain PTS-based. That VFR boundary mapping is a documented limitation.
+
+Sampling is **one frame shortly after each scene start** plus a periodic backup (default 5s). Short text flashes can be missed. Use `frames --at` for extra times without retranscribing.
+
+## Cache
+
+Stages are written atomically under `cache/`. Transcription is reused when the source fingerprint, model, language, and task match. Changing screenshot interval or report options does **not** rerun Whisper. Incomplete stage files are not treated as success. An output folder already bound to a **different** source is refused.
+
+## OCR
+
+On-screen text is stored separately from the spoken transcript (`onscreen.txt`, `ocr.json`). RapidOCR runs inside the venv. Tesseract is an optional extra engine. If both are missing, the job continues and OCR is recorded as unavailable.
+
+## Troubleshooting
+
+| Symptom | What to check |
+| --- | --- |
+| `doctor` fails on Python | Use 3.11, not 3.13 |
+| `ffmpeg` / `ffprobe` missing | Install FFmpeg and reopen the terminal |
+| First run hangs on network | Model download; wait, or pre-copy weights into the Whisper cache |
+| Empty transcript on a talking video | Confirm the file has an audio stream (`doctor` after a failed job: see `manifest.json`) |
+| Video with no audio | Visual outputs still write; transcription is marked unavailable (not a fake empty success) |
+| CUDA requested but CPU used | No supported GPU; the UI/CLI will say so |
+| OCR never runs / empty `onscreen.txt` | Leave OCR checked; RapidOCR is the default. Tesseract is optional. Use `--no-ocr` only to skip |
+| Streamlit rerun starts nothing | Use Run once; a session lock blocks overlapping jobs |
+| Another AI “didn’t see” images | Attach `frames/*.jpg` plus transcript; don’t rely on ZIP/Markdown paths |
+
+## Tests
+
+```powershell
+python -m pytest
+```
+
+The suite generates short ffmpeg fixtures (including a filename with spaces, no-audio, single-scene, and an offset/VFR case). A real Whisper pass uses `tiny.en` on a short spoken clip when weights can be loaded.

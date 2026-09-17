@@ -1,0 +1,41 @@
+[build-system]
+requires = ["setuptools>=68", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "vsl-study"
+version = "0.1.0"
+description = "Turn a local video sales letter into a timestamped transcript, real screenshots, and a portable evidence package."
+readme = "README.md"
+requires-python = ">=3.11,<3.12"
+authors = [{ name = "VSL Study" }]
+dependencies = [
+  "openai-whisper==20250625",
+  "scenedetect==0.7.1",
+  "opencv-python-headless>=4.9,<5",
+  "streamlit==1.63.0",
+  "pillow>=10.4.0,<12",
+  "pytesseract>=0.3.13,<0.4",
+  "rapidocr-onnxruntime>=1.4.4,<2",
+  "numpy>=1.24,<3",
+]
+
+[project.optional-dependencies]
+dev = ["pytest>=8.3,<9"]
+
+[project.scripts]
+vsl-study = "vsl_study.cli:main"
+
+[tool.setuptools.packages.find]
+where = ["src"]
+
+[tool.setuptools.package-data]
+vsl_study = ["ai_study_prompt.md"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+addopts = "-q"
+pythonpath = ["src"]
+markers = [
+  "slow: downloads Whisper weights or runs a real transcription",
+]

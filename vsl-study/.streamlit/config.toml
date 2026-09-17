@@ -1,0 +1,9 @@
+[server]
+address = "127.0.0.1"
+headless = false
+maxUploadSize = 100
+
+[browser]
+gatherUsageStats = false
+serverAddress = "localhost"
+
