@@ -15,6 +15,7 @@ from tkinter import BooleanVar, StringVar, Tk, filedialog, messagebox, ttk
 from tkinter.scrolledtext import ScrolledText
 import tkinter as tk
 
+from vsl_study.capture_meta import apply_desktop_capture_event
 from vsl_study.models import ProcessSettings
 from vsl_study.transcribe import SettingsError, validate_model_language
 
@@ -599,6 +600,8 @@ class VSLStudyApp:
         self.capturing = False
         self._capture_server = None
         self._processed_captures: set[str] = set()
+        self._capture_session_id: str | None = None
+        self._capture_generation = 0
         self.messages: queue.Queue[tuple[str, object]] = queue.Queue()
         self.last_job: str | None = None
         self._log_placeholder = True
@@ -713,6 +716,9 @@ class VSLStudyApp:
         record_row.pack(fill="x", pady=(self.layout.px(12), 0))
         self.record_btn = self._outline_button(record_row, "Record a browser tab", self._record_tab)
         self.record_btn.pack(side="left")
+        self.cancel_record_btn = self._outline_button(record_row, "Cancel recording", self._cancel_recording)
+        self.cancel_record_btn.pack(side="left", padx=(self.layout.px(8), 0))
+        self.cancel_record_btn.configure(state="disabled")
         tk.Label(
             record_row,
             text="Opens Chrome or Edge. Keep this window open. Capture takes real playback time.",
@@ -721,7 +727,7 @@ class VSLStudyApp:
             font=("Segoe UI", 9),
             anchor="w",
             justify="left",
-            wraplength=self.layout.px(320),
+            wraplength=self.layout.px(220),
         ).pack(side="left", padx=(self.layout.px(12), 0))
         tk.Frame(inner, bg=LINE, height=1).pack(fill="x", pady=self.layout.px(16))
         self._file_field(inner, "Save folder", self.output_var, "Choose folder", self._browse_output).pack(fill="x")
@@ -909,12 +915,10 @@ class VSLStudyApp:
         self.running = running
         if running:
             self.run_btn.configure(state="disabled", text="Working…", bg=ACCENT_OFF, cursor="arrow")
-            if hasattr(self, "record_btn"):
-                self.record_btn.configure(state="disabled")
+            self._sync_capture_buttons()
         else:
             self.run_btn.configure(state="normal", text="Create study folder", bg=ACCENT, cursor="hand2")
-            if hasattr(self, "record_btn") and not self.capturing:
-                self.record_btn.configure(state="normal")
+            self._sync_capture_buttons()
 
     def _set_log_placeholder(self, text: str) -> None:
         self._log_placeholder = True
@@ -1133,19 +1137,13 @@ class VSLStudyApp:
                 status_line, log_line = format_job_completion(data)
                 self.status_var.set(status_line)
                 self._append_log("done", log_line)
-            elif kind == "capture_ready":
-                self._on_capture_ready(json.loads(payload) if isinstance(payload, str) else payload)
-            elif kind == "capture_incomplete":
-                self.capturing = False
-                if hasattr(self, "record_btn") and not self.running:
-                    self.record_btn.configure(state="normal")
+            elif kind in {"capture_created", "capture_ready", "capture_incomplete", "capture_abandoned"}:
                 data = json.loads(payload) if isinstance(payload, str) else payload
-                message = data.get("message") or "Recording stopped without a complete capture. Partial media was kept and not analyzed as the full video."
-                self.status_var.set(message)
-                self._append_log("recording", message)
+                self._on_capture_event(kind, data if isinstance(data, dict) else {})
             elif kind == "error":
                 self._set_running(False)
                 self.capturing = False
+                self._sync_capture_buttons()
                 self.status_var.set("Something went wrong.")
                 self._append_log("error", payload)
                 messagebox.showerror("VSL Study", payload, parent=self.root)
@@ -1157,7 +1155,7 @@ class VSLStudyApp:
         if self.capturing:
             messagebox.showwarning(
                 "VSL Study",
-                "Finish the browser recording first, or close the recorder tab.",
+                "Finish the browser recording first, or click Cancel recording.",
                 parent=self.root,
             )
             return
@@ -1271,23 +1269,80 @@ class VSLStudyApp:
         except Exception as exc:  # noqa: BLE001
             messagebox.showerror("VSL Study", f"Could not start the local recorder.\n{exc}", parent=self.root)
             return
+        self._capture_generation = server.note_expected_client()
+        self._capture_session_id = None
         self.capturing = True
-        if hasattr(self, "record_btn"):
-            self.record_btn.configure(state="disabled")
+        self._sync_capture_buttons()
         self.status_var.set("Recording page opened. Choose the tab with audio, then start.")
         self._append_log(
             "recording",
             "Opened the local recorder. After you stop, this window transcribes and takes screenshots. "
-            "Keep the computer awake. This app cannot detect when the video ends.",
+            "Keep the computer awake. This app cannot detect when the video ends. "
+            "If you close the recorder tab, wait about three minutes or click Cancel recording.",
         )
         webbrowser.open(server.recorder_url)
 
-    def _on_capture_ready(self, data: dict) -> None:
-        rec_id = str(data.get("id") or "")
-        if rec_id and rec_id in self._processed_captures:
+    def _capture_gate(self) -> dict:
+        return {
+            "capturing": self.capturing,
+            "running": self.running,
+            "session_id": self._capture_session_id,
+            "generation": self._capture_generation,
+            "processed": set(self._processed_captures),
+        }
+
+    def _sync_capture_buttons(self) -> None:
+        recording_busy = self.running or self.capturing
+        if hasattr(self, "record_btn"):
+            self.record_btn.configure(state="disabled" if recording_busy else "normal")
+        if hasattr(self, "cancel_record_btn"):
+            self.cancel_record_btn.configure(state="normal" if self.capturing and not self.running else "disabled")
+
+    def _cancel_recording(self) -> None:
+        if not self.capturing:
             return
-        if rec_id:
-            self._processed_captures.add(rec_id)
+        if self._capture_server is not None:
+            try:
+                self._capture_server.abandon_page("desktop_cancel")
+            except Exception:
+                pass
+        self.capturing = False
+        self._capture_session_id = None
+        self._sync_capture_buttons()
+        message = "Recording cancelled. Partial media already saved was kept. You can record again or choose a file."
+        self.status_var.set(message)
+        self._append_log("recording", message)
+
+    def _on_capture_event(self, kind: str, data: dict) -> None:
+        next_state = apply_desktop_capture_event(self._capture_gate(), kind, data)
+        if next_state.get("ignored"):
+            return
+        self.capturing = bool(next_state.get("capturing"))
+        self._capture_session_id = next_state.get("session_id")
+        self._processed_captures = set(next_state.get("processed") or [])
+        self._sync_capture_buttons()
+        if kind == "capture_created":
+            return
+        if kind == "capture_abandoned":
+            reason = str(data.get("reason") or "abandoned")
+            if reason == "desktop_cancel":
+                return
+            message = (
+                "The recorder page was closed or stopped sending heartbeats. "
+                "Partial media already saved was kept. You can record again or choose a file."
+            )
+            self.status_var.set(message)
+            self._append_log("recording", message)
+            return
+        if kind == "capture_incomplete":
+            message = data.get("message") or "Recording stopped without a complete capture. Partial media was kept and not analyzed as the full video."
+            self.status_var.set(message)
+            self._append_log("recording", message)
+            return
+        if kind == "capture_ready" and next_state.get("process"):
+            self._start_capture_job(data)
+
+    def _start_capture_job(self, data: dict) -> None:
         if data.get("duplicate") and self.running:
             return
         path = str(data.get("path") or "")
@@ -1296,13 +1351,10 @@ class VSLStudyApp:
         if not path or not dest:
             self.status_var.set("Recording saved, but the save folder is missing.")
             self._append_log("error", "Recording finished without a save folder.")
-            self.capturing = False
             return
         settings = self._snapshot_settings(capture)
         if settings is None:
-            self.capturing = False
             return
-        self.capturing = False
         self.input_var.set(path)
         self._append_log("validate", "Recording saved. Starting the study folder.")
         self._start_process(path, dest, settings)

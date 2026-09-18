@@ -6,7 +6,7 @@ from pathlib import Path
 import pytest
 
 from vsl_study.capture_meta import sanitize_source_url, should_process
-from vsl_study.capture_store import CaptureError, ChunkSession, sha256_hex
+from vsl_study.capture_store import CaptureError, ChunkSession, publish_recording, sha256_hex
 
 
 def _chunk(session: ChunkSession, seq: int, data: bytes, last: bool = False):
@@ -104,3 +104,14 @@ def test_should_process_only_intentional_complete():
     assert should_process("stop_sharing", True, True) is False
     assert should_process("user_stop", False, True) is False
     assert should_process("user_stop", True, False) is False
+
+
+def test_publish_recording_copies_in_chunks(tmp_path: Path):
+    src = tmp_path / "stream.bin"
+    dest = tmp_path / "recording.webm"
+    payload = b"abcdef" * 40_000
+    src.write_bytes(payload)
+    publish_recording(src, dest, chunk_size=1024)
+    assert dest.read_bytes() == payload
+    assert src.read_bytes() == payload
+    assert not (tmp_path / "recording.webm.part").exists()

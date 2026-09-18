@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import os
 import threading
 from pathlib import Path
 from typing import Any, Callable
@@ -23,6 +24,37 @@ class CaptureError(RuntimeError):
 
 def sha256_hex(data: bytes) -> str:
     return hashlib.sha256(data).hexdigest()
+
+
+def publish_recording(src: Path, dest: Path, chunk_size: int = 1024 * 1024) -> None:
+    """Copy assembled bytes to dest without loading the whole file into memory.
+
+    Writes to a sibling .part file, then replaces dest so a failed copy never
+    publishes a truncated recording. The source stream is left in place.
+    """
+    if chunk_size < 1:
+        raise ValueError("chunk_size must be at least 1")
+    dest.parent.mkdir(parents=True, exist_ok=True)
+    tmp = dest.with_name(dest.name + ".part")
+    try:
+        if tmp.exists():
+            tmp.unlink()
+        with src.open("rb") as inf, tmp.open("wb") as out:
+            while True:
+                block = inf.read(chunk_size)
+                if not block:
+                    break
+                out.write(block)
+            out.flush()
+            os.fsync(out.fileno())
+        os.replace(tmp, dest)
+    except Exception:
+        try:
+            if tmp.exists():
+                tmp.unlink()
+        except OSError:
+            pass
+        raise
 
 
 class ChunkSession:
@@ -55,6 +87,8 @@ class ChunkSession:
         self.finalized = False
         self.processing_started = False
         self.cancelled = False
+        self.incomplete_notified = False
+        self.assemble_lock = threading.Lock()
         self.mime_type = ""
         self.title = ""
         self.source_url = ""
@@ -76,6 +110,7 @@ class ChunkSession:
         self.finalized = bool(data.get("finalized"))
         self.processing_started = bool(data.get("processing_started"))
         self.cancelled = bool(data.get("cancelled"))
+        self.incomplete_notified = bool(data.get("incomplete_notified"))
         self.mime_type = str(data.get("mime_type") or "")
         self.title = str(data.get("title") or "")
         self.source_url = str(data.get("source_url") or "")
@@ -93,6 +128,7 @@ class ChunkSession:
                 "finalized": self.finalized,
                 "processing_started": self.processing_started,
                 "cancelled": self.cancelled,
+                "incomplete_notified": self.incomplete_notified,
                 "pending_bytes": self.pending_bytes,
                 "mime_type": self.mime_type,
                 "title": self.title,
@@ -109,6 +145,7 @@ class ChunkSession:
             "finalized": self.finalized,
             "processing_started": self.processing_started,
             "cancelled": self.cancelled,
+            "incomplete_notified": self.incomplete_notified,
             "mime_type": self.mime_type,
             "title": self.title,
             "source_url": self.source_url,
@@ -246,6 +283,14 @@ class ChunkSession:
             if self.processing_started:
                 return False
             self.processing_started = True
+            self._save()
+            return True
+
+    def try_notify_incomplete(self) -> bool:
+        with self.lock:
+            if self.processing_started or self.incomplete_notified:
+                return False
+            self.incomplete_notified = True
             self._save()
             return True
 

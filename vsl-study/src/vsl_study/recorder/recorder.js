@@ -2,26 +2,22 @@
   const token = new URLSearchParams(location.search).get("token") || "";
   const headers = () => ({ "X-VSL-Token": token });
   const $ = (id) => document.getElementById(id);
+  const CapturePipeline = (window.VslCapture || {}).CapturePipeline;
 
   const state = {
     stream: null,
     recorder: null,
     recId: null,
-    seq: 0,
     mime: "",
     recording: false,
-    stopping: false,
-    finalized: false,
     audioTrack: false,
     audioDetected: false,
     startedAt: 0,
     timer: null,
     poll: null,
-    pending: 0,
-    pendingBytes: 0,
-    maxPendingBytes: 12 * 1024 * 1024,
-    queue: [],
-    uploading: false,
+    heartbeat: null,
+    pipeline: null,
+    meterContext: null,
   };
 
   const status = (text) => { $("status").textContent = text; };
@@ -35,11 +31,6 @@
   function pickMime() {
     if (!window.MediaRecorder || !MediaRecorder.isTypeSupported) return "video/webm";
     return TYPES.find((t) => MediaRecorder.isTypeSupported(t)) || "video/webm";
-  }
-
-  async function sha256(buf) {
-    const hash = await crypto.subtle.digest("SHA-256", buf);
-    return [...new Uint8Array(hash)].map((b) => b.toString(16).padStart(2, "0")).join("");
   }
 
   async function api(path, opts) {
@@ -68,6 +59,40 @@
     stream.getTracks().forEach((t) => t.stop());
   }
 
+  function releasePreview() {
+    stopTracks(state.stream);
+    state.stream = null;
+    const preview = $("preview");
+    if (preview) preview.srcObject = null;
+    if (state.meterContext) {
+      state.meterContext.close().catch(() => {});
+      state.meterContext = null;
+    }
+  }
+
+  async function beat() {
+    await api("/api/heartbeat", {
+      method: "POST",
+      headers: { ...headers(), "Content-Type": "application/json" },
+      body: JSON.stringify({ id: state.recId }),
+    });
+  }
+
+  function startHeartbeat() {
+    if (state.heartbeat) return;
+    beat().catch(() => {});
+    state.heartbeat = setInterval(() => {
+      beat().catch(() => {});
+    }, 15000);
+  }
+
+  function stopHeartbeat() {
+    if (state.heartbeat) {
+      clearInterval(state.heartbeat);
+      state.heartbeat = null;
+    }
+  }
+
   function watchSession() {
     if (state.poll) clearInterval(state.poll);
     state.poll = setInterval(async () => {
@@ -90,6 +115,7 @@
     state.audioDetected = false;
     $("signal-state").textContent = "No audible signal detected";
     const ctx = new AudioContext();
+    state.meterContext = ctx;
     const source = ctx.createMediaStreamSource(stream);
     const analyser = ctx.createAnalyser();
     analyser.fftSize = 256;
@@ -98,6 +124,7 @@
     const tick = () => {
       if (!state.stream) {
         ctx.close().catch(() => {});
+        if (state.meterContext === ctx) state.meterContext = null;
         return;
       }
       analyser.getByteFrequencyData(data);
@@ -137,7 +164,7 @@
     try {
       stream = await navigator.mediaDevices.getDisplayMedia(opts);
     } catch (err) {
-      status("Tab sharing was cancelled. Nothing was recorded.");
+      status("Tab sharing was cancelled. Nothing was recorded. Choose the tab again when you are ready.");
       $("start").disabled = true;
       return;
     }
@@ -154,7 +181,7 @@
     if (state.audioTrack) setupMeter(stream);
     stream.getVideoTracks().forEach((track) => {
       track.addEventListener("ended", () => {
-        if (state.recording) finish("stop_sharing");
+        if (state.recording) requestFinish("stop_sharing");
         else status("Sharing ended. Choose the tab again to record.");
       });
     });
@@ -171,7 +198,7 @@
     const m = Math.floor(s / 60);
     $("clock").textContent = `Recording ${String(m).padStart(2, "0")}:${String(s % 60).padStart(2, "0")} — lead-in is part of this timeline`;
     const limit = Number($("limit").value);
-    if (limit > 0 && s >= limit * 60) finish("max_duration");
+    if (limit > 0 && s >= limit * 60) requestFinish("max_duration");
   }
 
   async function ensureSession() {
@@ -189,60 +216,131 @@
     state.recId = created.id;
   }
 
-  async function pump() {
-    if (state.uploading) return;
-    state.uploading = true;
-    try {
-      while (state.queue.length) {
-        if (state.pendingBytes > state.maxPendingBytes && state.recording) {
-          status("Saving cannot keep up. Stopping so media is not dropped silently.");
-          await finish("upload_failed");
-          break;
+  function makePipeline() {
+    if (!CapturePipeline) {
+      throw new Error("Recorder core did not load.");
+    }
+    return new CapturePipeline({
+      uploadChunk: async (item) => {
+        if (!state.recId) throw new Error("Recording session is missing.");
+        await api(`/api/recordings/${state.recId}/chunks/${item.seq}`, {
+          method: "PUT",
+          headers: {
+            ...headers(),
+            "Content-Type": "application/octet-stream",
+            "X-Content-SHA256": item.checksum,
+            "X-Last-Chunk": item.last ? "1" : "0",
+          },
+          body: item.bytes,
+        });
+      },
+      onStatus: (info) => {
+        if (info && info.savedThrough != null && !info.last) {
+          $("save-state").textContent = `Saved chunks through ${info.savedThrough}.`;
         }
-        const item = state.queue[0];
-        let attempt = 0;
-        while (attempt < 5) {
-          try {
-            await api(`/api/recordings/${state.recId}/chunks/${item.seq}`, {
-              method: "PUT",
-              headers: {
-                ...headers(),
-                "Content-Type": "application/octet-stream",
-                "X-Content-SHA256": item.checksum,
-                "X-Last-Chunk": item.last ? "1" : "0",
-              },
-              body: item.bytes,
-            });
-            state.pendingBytes -= item.bytes.byteLength;
-            state.queue.shift();
-            $("save-state").textContent = `Saved chunks through ${item.seq}.`;
-            break;
-          } catch (err) {
-            if (err.code === "conflict" || err.code === "finalized") throw err;
-            attempt += 1;
-            if (attempt >= 5) throw err;
-            await new Promise((r) => setTimeout(r, 400 * attempt));
-          }
+        if (info && info.failed && state.pipeline && !state.pipeline.finishPromise) {
+          status(info.message || "Saving failed. Partial media was kept.");
+          requestFinish(info.code || "upload_failed");
         }
+      },
+    });
+  }
+
+  function waitForRecorderStop(rec) {
+    return new Promise((resolve, reject) => {
+      if (!rec || rec.state === "inactive") {
+        resolve();
+        return;
       }
-    } finally {
-      state.uploading = false;
+      rec.addEventListener("stop", () => resolve(), { once: true });
+      rec.addEventListener("error", () => {
+        reject(Object.assign(new Error("The recorder reported an error. Partial media was kept."), { code: "recorder_error" }));
+      }, { once: true });
+      try {
+        rec.stop();
+      } catch (err) {
+        resolve();
+      }
+    });
+  }
+
+  function requestFinish(reason) {
+    const pipeline = state.pipeline;
+    if (!pipeline) {
+      return abortLocal(reason);
+    }
+    return pipeline.finish(reason, {
+      stopRecorder: () => waitForRecorderStop(state.recorder),
+      finalizeRemote: (stopReason) => finalizeRemote(stopReason),
+      cancelRemote: (stopReason) => cancelRemote(stopReason),
+    }).then((result) => {
+      afterFinish(result, reason);
+      state.recId = null;
+      state.pipeline = null;
+      state.recorder = null;
+      return result;
+    }).catch((err) => {
+      status((err && err.message) || String(err));
+      releasePreview();
+      restoreChooser();
+    });
+  }
+
+  async function finalizeRemote(reason) {
+    if (!state.recId) {
+      throw Object.assign(new Error("Recording session is missing."), { code: "not_found" });
+    }
+    return api(`/api/recordings/${state.recId}/finalize`, {
+      method: "POST",
+      headers: { ...headers(), "Content-Type": "application/json" },
+      body: JSON.stringify({
+        stop_reason: reason,
+        mime_type: state.mime,
+        audio_track: state.audioTrack,
+        audio_detected: state.audioDetected,
+        title: $("title").value,
+        browser: { userAgent: navigator.userAgent, vendor: navigator.vendor },
+      }),
+    });
+  }
+
+  async function cancelRemote(reason) {
+    if (!state.recId || reason === "app_closed") return;
+    try {
+      await api(`/api/recordings/${state.recId}/cancel`, {
+        method: "POST",
+        headers: { ...headers(), "Content-Type": "application/json" },
+        body: JSON.stringify({ reason }),
+      });
+    } catch (err) {
+      /* session may already be gone */
     }
   }
 
-  async function enqueue(blob, last) {
-    const buf = await blob.arrayBuffer();
-    const bytes = new Uint8Array(buf);
-    if (bytes.byteLength === 0 && !last) return;
-    const checksum = await sha256(bytes);
-    const seq = state.seq;
-    state.seq += 1;
-    state.pendingBytes += bytes.byteLength;
-    if (state.pendingBytes > state.maxPendingBytes * 1.5) {
-      throw new Error("Too much unsaved media in memory.");
+  function afterFinish(result, reason) {
+    state.recording = false;
+    $("stop").disabled = true;
+    $("cancel").disabled = true;
+    if (state.timer) clearInterval(state.timer);
+    releasePreview();
+    const process = result && result.process;
+    if (process) {
+      status("Saved. Transcribing and screenshots continue in the VSL Study window. Open the evidence from there when it finishes.");
+    } else if (reason === "user_stop" || reason === "max_duration") {
+      status((result && result.error && result.error.message) || "Partial recording saved. It was not treated as a complete VSL, so it was not analyzed automatically.");
+      restoreChooser();
+    } else {
+      status((result && result.error && result.error.message) || "Recording stopped without a complete capture. Partial media already saved was kept.");
+      restoreChooser();
     }
-    state.queue.push({ seq, bytes, checksum, last });
-    pump();
+  }
+
+  function restoreChooser() {
+    $("choose").disabled = false;
+    $("start").disabled = true;
+    $("stop").disabled = true;
+    $("cancel").disabled = false;
+    $("clock").textContent = "Not recording";
   }
 
   $("start").onclick = async () => {
@@ -254,15 +352,24 @@
       state.mime = pickMime();
       await ensureSession();
       watchSession();
-      state.seq = 0;
-      state.finalized = false;
-      state.stopping = false;
+      state.pipeline = makePipeline();
       const rec = new MediaRecorder(state.stream, { mimeType: state.mime, videoBitsPerSecond: 2_500_000 });
       state.recorder = rec;
       rec.ondataavailable = (ev) => {
-        if (ev.data && ev.data.size) enqueue(ev.data, false).catch((err) => status(err.message));
+        if (!state.pipeline) return;
+        try {
+          state.pipeline.acceptMedia(ev.data);
+        } catch (err) {
+          status(err.message || String(err));
+          requestFinish("upload_failed");
+        }
       };
-      rec.onerror = () => status("The recorder reported an error. Partial media was kept if anything was saved.");
+      rec.onerror = () => {
+        if (state.pipeline) {
+          state.pipeline._fail("recorder_error", "The recorder reported an error. Partial media was kept if anything was saved.");
+        }
+        requestFinish("recorder_error");
+      };
       rec.start(3000);
       state.recording = true;
       state.startedAt = Date.now();
@@ -277,96 +384,67 @@
     }
   };
 
-  async function waitForUploads() {
-    const start = Date.now();
-    while ((state.queue.length || state.uploading) && Date.now() - start < 120000) {
-      await pump();
-      await new Promise((r) => setTimeout(r, 50));
-    }
-    if (state.queue.length) throw new Error("Not all chunks were acknowledged.");
-  }
-
-    async function finish(reason) {
-    if (state.stopping || state.finalized) return;
-    state.stopping = true;
-    state.recording = false;
-    $("stop").disabled = true;
-    if (state.timer) clearInterval(state.timer);
-    status("Saving…");
-    const rec = state.recorder;
-    await new Promise((resolve) => {
-      if (!rec || rec.state === "inactive") {
-        resolve();
-        return;
-      }
-      rec.addEventListener("stop", () => resolve(), { once: true });
-      try {
-        rec.stop();
-      } catch (err) {
-        resolve();
-      }
-      setTimeout(resolve, 4000);
-    });
-    await new Promise((r) => setTimeout(r, 50));
-    try {
-      await waitForUploads();
-      if (state.seq > 0) await enqueue(new Blob([new Uint8Array(0)]), true);
-      await waitForUploads();
-    } catch (err) {
-      status(`Saving failed. Partial file was kept. ${err.message}`);
-      stopTracks(state.stream);
-      return;
-    }
-    status("Validating…");
-    try {
-      const result = await api(`/api/recordings/${state.recId}/finalize`, {
-        method: "POST",
-        headers: { ...headers(), "Content-Type": "application/json" },
-        body: JSON.stringify({
-          stop_reason: reason,
-          mime_type: state.mime,
-          audio_track: state.audioTrack,
-          audio_detected: state.audioDetected,
-          title: $("title").value,
-          browser: { userAgent: navigator.userAgent, vendor: navigator.vendor },
-        }),
-      });
-      state.finalized = true;
-      stopTracks(state.stream);
-      if (result.process) {
-        status("Saved. Transcribing and screenshots continue in the VSL Study window. Open the evidence from there when it finishes.");
-      } else {
-        status("Partial recording saved. It was not treated as a complete VSL, so it was not analyzed automatically.");
-      }
-    } catch (err) {
-      status(err.message || String(err));
-      stopTracks(state.stream);
-    }
-  }
-
   async function abortLocal(reason) {
-    if (state.finalized) return;
+    const pipeline = state.pipeline;
+    if (pipeline && pipeline.finishPromise) {
+      return pipeline.finishPromise;
+    }
+    if (pipeline) {
+      pipeline._fail(reason || "cancelled", "Recording stopped. Partial media already saved was kept.");
+      return requestFinish(reason);
+    }
     state.recording = false;
     try {
       if (state.recorder && state.recorder.state !== "inactive") state.recorder.stop();
     } catch (err) {
       /* ignore */
     }
-    stopTracks(state.stream);
-    if (state.recId && reason !== "app_closed") {
-      try {
-        await api(`/api/recordings/${state.recId}/cancel`, { method: "POST", headers: headers(), body: "{}", });
-      } catch (err) {
-        /* ignore */
-      }
-    }
-    state.stopping = false;
+    releasePreview();
+    await cancelRemote(reason);
+    restoreChooser();
   }
 
-  $("stop").onclick = () => finish("user_stop");
-  window.addEventListener("beforeunload", () => {
-    if (state.recording) {
-      stopTracks(state.stream);
+  async function cancelPage() {
+    $("cancel").disabled = true;
+    $("stop").disabled = true;
+    if (state.timer) clearInterval(state.timer);
+    state.recording = false;
+    try {
+      if (state.pipeline) {
+        await requestFinish("client_cancel");
+      } else {
+        await abortLocal("client_cancel");
+      }
+    } catch (err) {
+      status(err.message || String(err));
     }
+    try {
+      await api("/api/page/cancel", {
+        method: "POST",
+        headers: { ...headers(), "Content-Type": "application/json" },
+        body: JSON.stringify({ reason: "client_cancel" }),
+      });
+    } catch (err) {
+      /* desktop may already have reset */
+    }
+    stopHeartbeat();
+    if (state.poll) {
+      clearInterval(state.poll);
+      state.poll = null;
+    }
+    restoreChooser();
+    $("cancel").disabled = true;
+    status("Cancelled. You can close this tab. VSL Study is ready for another recording or a local file.");
+  }
+
+  $("stop").onclick = () => requestFinish("user_stop");
+  $("cancel").onclick = () => cancelPage();
+  document.addEventListener("visibilitychange", () => {
+    if (document.visibilityState === "visible") beat().catch(() => {});
   });
+  window.addEventListener("pagehide", () => {
+    releasePreview();
+  });
+  startHeartbeat();
+  watchSession();
 })();

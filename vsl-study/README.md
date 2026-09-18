@@ -108,6 +108,8 @@ Recordings are saved under `%LOCALAPPDATA%\VSL Study\captures\` (unique folder p
 
 If the recorder tab crashes, the browser loses the unsaved buffer. Chunks already acknowledged on disk are kept. Incomplete recordings are **not** treated as a full VSL and are not analyzed automatically.
 
+The desktop watches a **3-minute heartbeat lease**. The recorder page pings the local service about every 15 seconds, and also when you return to that tab. Chrome may delay timers in a background tab to about once a minute, so the lease is longer than that on purpose — watching the VSL in another tab should not cancel the recording. If the page is closed or the browser disappears, the lease expires, saved chunks are kept, and **Cancel recording** (or waiting out the lease) returns the desktop to a usable state without restarting the app. Unload beacons are not relied on.
+
 Capture takes **real playback time**. Keep the computer awake. The app cannot press play or detect when a cross-origin video ends. A minutes field, if you fill it, is only a time limit.
 
 After you click **Record a browser tab**:
@@ -115,7 +117,7 @@ After you click **Record a browser tab**:
 1. **Open page** — optional address; or open the VSL yourself.
 2. **Select tab with audio** — choose that browser tab and turn on sharing its sound.
 3. **Start and play** — start recording, then play the video from the beginning if you can. Lead-in is part of the recording timeline.
-4. **Stop and process** — wait until saving finishes; the desktop window then transcribes and takes screenshots.
+4. **Stop and process** — wait until saving finishes; the desktop window then transcribes and takes screenshots. **Cancel recording** (on this page or in VSL Study) gives up without analyzing. Canceling the browser’s tab picker only lets you choose again.
 5. **Open evidence** — **Open save folder** / **Open report** in VSL Study.
 
 Timestamps in the report are relative to **this recording**, not verified times in the original video.

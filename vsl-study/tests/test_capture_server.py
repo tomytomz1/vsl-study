@@ -10,8 +10,11 @@ def test_recorder_package_files_exist():
     css = recorder_bytes("recorder.css").decode("utf-8")
     assert "Choose tab and audio" in html
     assert "Stop and process" in html
+    assert "Cancel recording" in html
     assert "getDisplayMedia" in js
     assert "audio" in js
+    core = recorder_bytes("recorder-core.js").decode("utf-8")
+    assert "CapturePipeline" in core
     assert "--accent" in css
 
 
@@ -131,3 +134,22 @@ def test_stop_server_ends_health_and_cancels_session(tmp_path: Path):
     except (urllib.error.URLError, ConnectionError, OSError):
         pass
     assert rec.cancelled is True
+
+
+def test_recorder_core_script_is_served(tmp_path: Path):
+    import urllib.request
+
+    server = CaptureServer(tmp_path)
+    server.start()
+    try:
+        url = f"http://127.0.0.1:{server.port}/recorder-core.js"
+        with urllib.request.urlopen(url, timeout=5) as resp:
+            body = resp.read().decode("utf-8")
+        assert "CapturePipeline" in body
+        html_url = f"http://127.0.0.1:{server.port}/recorder?token={server.token}"
+        with urllib.request.urlopen(html_url, timeout=5) as resp:
+            html = resp.read().decode("utf-8")
+        assert "recorder-core.js" in html
+        assert "Cancel recording" in html
+    finally:
+        server.stop()
