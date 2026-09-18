@@ -9,23 +9,47 @@
 }
 * { box-sizing: border-box; }
 html, body { margin: 0; background: var(--bg); color: var(--ink); font: 16px/1.45 "Segoe UI", sans-serif; }
-main { max-width: 40rem; margin: 0 auto; padding: 2rem 1.25rem 3rem; }
-h1 { font-size: 1.75rem; margin: 0 0 0.5rem; }
-.lede, .hint, .instruct, .warn { color: var(--muted); }
-.warn { border-left: 3px solid var(--accent); padding-left: 0.75rem; }
-.steps { padding-left: 1.2rem; }
-.steps li { margin: 0.15rem 0; }
-label { display: block; margin: 1rem 0 0; font-size: 0.9rem; }
-input { width: 100%; margin-top: 0.35rem; padding: 0.7rem 0.8rem; border: 1px solid var(--line); border-radius: 2px; background: var(--surface); font: inherit; color: var(--ink); }
-.row { display: flex; gap: 0.75rem; flex-wrap: wrap; margin: 1.1rem 0; }
-button { font: 600 1rem/1.2 "Segoe UI", sans-serif; padding: 0.75rem 1rem; border: 1px solid var(--line); background: var(--surface); color: var(--ink); cursor: pointer; }
+main { width: 100%; max-width: 54rem; margin-inline: auto; padding: 1.5rem 1.25rem; }
+header { margin-bottom: 1rem; }
+.eyebrow { margin: 0 0 0.25rem; color: var(--accent); font-size: 0.75rem; font-weight: 700; letter-spacing: 0.12em; }
+h1 { font-size: clamp(1.5rem, 4vw, 1.9rem); margin: 0; }
+h2 { display: flex; align-items: center; gap: 0.6rem; font-size: 1.05rem; margin: 0; }
+p { margin: 0.5rem 0 0.75rem; }
+.lede, .hint, footer { color: var(--muted); }
+.step { display: inline-grid; place-items: center; flex: 0 0 1.6rem; height: 1.6rem; border-radius: 50%; background: #e5ebe5; color: var(--accent); font-size: 0.85rem; }
+.card { background: var(--surface); border: 1px solid var(--line); border-radius: 10px; padding: 1rem; margin-bottom: 0.75rem; }
+.card > p { font-size: 0.9rem; }
+label { display: block; margin-top: 0.75rem; font-size: 0.9rem; font-weight: 600; }
+input { width: 100%; margin-top: 0.3rem; padding: 0.65rem 0.75rem; border: 1px solid var(--line); border-radius: 6px; background: var(--surface); font: inherit; color: var(--ink); }
+button { font: 600 0.95rem/1.2 "Segoe UI", sans-serif; padding: 0.75rem 1rem; min-height: 44px; border: 1px solid var(--line); border-radius: 6px; background: var(--surface); color: var(--ink); cursor: pointer; }
 button.primary, button#choose, button#start { background: var(--accent); color: var(--on-accent); border-color: var(--accent); }
 button:disabled { opacity: 0.45; cursor: not-allowed; }
 button.ghost { background: transparent; }
-.preview-wrap { background: #111; border-radius: 4px; overflow: hidden; margin: 1rem 0; }
-video { display: block; width: 100%; max-height: 240px; background: #000; }
-.meters { padding: 0.75rem 1rem 1rem; color: #eee; font-size: 0.9rem; }
-.bar { height: 8px; background: #333; margin: 0.4rem 0; }
+button:focus-visible, input:focus-visible, summary:focus-visible { outline: 3px solid #507dba; outline-offset: 3px; }
+.preview-wrap { display: grid; grid-template-columns: minmax(0, 1fr) minmax(0, 1fr); align-items: center; background: #171b19; border-radius: 6px; overflow: hidden; }
+video { display: block; width: 100%; height: 135px; object-fit: contain; background: #000; }
+.meters { padding: 1rem; color: #eee; font-size: 0.85rem; }
+.bar { height: 8px; background: #454a46; margin: 0.6rem 0; border-radius: 4px; overflow: hidden; }
 #level { display: block; height: 8px; width: 0; background: #8fcaa8; }
-#status { min-height: 3em; }
-#clock, #save-state { margin: 0.25rem 0; }
+.hint { font-size: 0.8rem; margin-bottom: 0; }
+.options { padding: 0.6rem 1rem; border: 1px solid var(--line); border-radius: 8px; margin-bottom: 0.75rem; }
+summary { cursor: pointer; font-size: 0.9rem; font-weight: 600; }
+.options[open] { padding-bottom: 1rem; }
+.options button { margin-top: 0.75rem; }
+.record-controls { position: sticky; bottom: 0; background: var(--surface); border: 1px solid var(--line); border-radius: 10px; padding: 1rem; box-shadow: 0 -4px 16px #1e3a2f0a; }
+.record-controls > p { font-size: 0.9rem; }
+.row { display: flex; gap: 0.6rem; flex-wrap: wrap; }
+.record-state { display: flex; gap: 0.3rem 1rem; flex-wrap: wrap; color: var(--muted); font-size: 0.8rem; margin-top: 0.6rem; }
+#clock, #save-state { margin: 0; }
+#status { margin: 0.5rem 0 0; overflow-wrap: anywhere; }
+#status:empty { display: none; }
+footer { font-size: 0.8rem; padding: 0.75rem 0 0; }
+@media (max-width: 520px) {
+  main { padding: 1rem 0.75rem; }
+  .preview-wrap { grid-template-columns: 1fr; }
+  video { height: 120px; }
+  .meters { padding: 0.75rem; }
+  .row > button { flex: 1 1 auto; }
+  .record-controls { position: static; }
+}
+@media (max-height: 650px) { .record-controls { position: static; } }
