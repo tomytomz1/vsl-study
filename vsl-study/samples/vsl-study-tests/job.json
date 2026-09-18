@@ -1,0 +1,70 @@
+{
+  "schema": 1,
+  "stages": {
+    "inspect": {
+      "status": "complete",
+      "cache_key": "b01e5aa26fac2c3442df1dad7358a00fbd527104126d05294ee12a15561bfc2c"
+    },
+    "transcribe": {
+      "status": "failed",
+      "cache_key": "b01e5aa26fac2c3442df1dad7358a00fbd527104126d05294ee12a15561bfc2c|small.en|en|transcribe"
+    },
+    "audio": {
+      "status": "complete",
+      "cache_key": "b01e5aa26fac2c3442df1dad7358a00fbd527104126d05294ee12a15561bfc2c"
+    },
+    "scenes": {
+      "status": "complete",
+      "cache_key": "b01e5aa26fac2c3442df1dad7358a00fbd527104126d05294ee12a15561bfc2c|adaptive"
+    },
+    "frames": {
+      "status": "running",
+      "cache_key": "b01e5aa26fac2c3442df1dad7358a00fbd527104126d05294ee12a15561bfc2c|adaptive|5.000|0.250|1280|"
+    }
+  },
+  "source": {
+    "path": "C:\\Users\\Tomas\\AppData\\Local\\VSL Study\\captures\\010fac1ba67146b7a8f7c8e615dd9ca2\\recording.fixed.webm",
+    "resolved_path": "C:\\Users\\Tomas\\AppData\\Local\\VSL Study\\captures\\010fac1ba67146b7a8f7c8e615dd9ca2\\recording.fixed.webm",
+    "size_bytes": 24341269,
+    "mtime_ns": 1789701059200213600,
+    "fingerprint": "b01e5aa26fac2c3442df1dad7358a00fbd527104126d05294ee12a15561bfc2c",
+    "duration_s": 120.062
+  },
+  "settings": {
+    "model": "small.en",
+    "language": "en",
+    "task": "transcribe",
+    "detector": "adaptive",
+    "interval": 5.0,
+    "scene_start_offset": 0.25,
+    "max_width": 1280,
+    "ocr": false,
+    "context_window_s": 2.0,
+    "compact_view": true,
+    "include_media": false,
+    "device": "auto"
+  },
+  "capture": {
+    "input_type": "browser_tab_recording",
+    "recording_id": "010fac1ba67146b7a8f7c8e615dd9ca2",
+    "source_url_user_supplied": "https://theenergyrevolution.net/index-ers-auto-lead-39-promise-epp-lead-6-v3-u7-u10.php",
+    "title": "My first test ever",
+    "started_at": "2026-09-18T03:08:57Z",
+    "ended_at": "2026-09-18T03:11:01Z",
+    "media_duration_s": 120.062,
+    "browser": {
+      "userAgent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/152.0.0.0 Safari/537.36",
+      "vendor": "Google Inc."
+    },
+    "mime_type": "video/webm;codecs=vp9,opus",
+    "audio_track": true,
+    "audio_detected": true,
+    "stop_reason": "max_duration",
+    "complete": true,
+    "problems": [
+      "Container duration was missing; a copy remux restored seek metadata."
+    ],
+    "recording_path": "C:\\Users\\Tomas\\AppData\\Local\\VSL Study\\captures\\010fac1ba67146b7a8f7c8e615dd9ca2\\recording.fixed.webm",
+    "timeline_note": "Timestamps are relative to this recording, not verified times in the original video. Pauses, buffering, lead-in, and seeking can make the two timelines differ. The URL is what the user typed; it is not proof that the selected tab matched."
+  }
+}

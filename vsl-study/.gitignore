@@ -16,5 +16,8 @@ output/
 *.wav
 *.zip
 *.log
+
+# Keep the checked-in live capture sample, including extracted audio.
+!samples/vsl-study-tests/cache/audio.wav
 .streamlit/secrets.toml
 .streamlit/credentials.toml

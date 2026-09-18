@@ -1,0 +1,391 @@
+{
+  "status": "complete",
+  "cache_key": "b01e5aa26fac2c3442df1dad7358a00fbd527104126d05294ee12a15561bfc2c|adaptive",
+  "scenes": [
+    {
+      "id": "scene_0001",
+      "start": 0.0,
+      "end": 0.303,
+      "start_frame": 0,
+      "end_frame": 303
+    },
+    {
+      "id": "scene_0002",
+      "start": 0.303,
+      "end": 1.075,
+      "start_frame": 303,
+      "end_frame": 1075
+    },
+    {
+      "id": "scene_0003",
+      "start": 1.075,
+      "end": 1.308,
+      "start_frame": 1075,
+      "end_frame": 1308
+    },
+    {
+      "id": "scene_0004",
+      "start": 1.308,
+      "end": 1.508,
+      "start_frame": 1308,
+      "end_frame": 1508
+    },
+    {
+      "id": "scene_0005",
+      "start": 1.508,
+      "end": 2.459,
+      "start_frame": 1508,
+      "end_frame": 2459
+    },
+    {
+      "id": "scene_0006",
+      "start": 2.459,
+      "end": 3.459,
+      "start_frame": 2459,
+      "end_frame": 3459
+    },
+    {
+      "id": "scene_0007",
+      "start": 3.459,
+      "end": 3.858,
+      "start_frame": 3459,
+      "end_frame": 3858
+    },
+    {
+      "id": "scene_0008",
+      "start": 3.858,
+      "end": 4.791,
+      "start_frame": 3858,
+      "end_frame": 4791
+    },
+    {
+      "id": "scene_0009",
+      "start": 4.791,
+      "end": 5.791,
+      "start_frame": 4791,
+      "end_frame": 5791
+    },
+    {
+      "id": "scene_0010",
+      "start": 5.791,
+      "end": 10.425,
+      "start_frame": 5791,
+      "end_frame": 10425
+    },
+    {
+      "id": "scene_0011",
+      "start": 10.425,
+      "end": 11.891,
+      "start_frame": 10425,
+      "end_frame": 11891
+    },
+    {
+      "id": "scene_0012",
+      "start": 11.891,
+      "end": 13.791,
+      "start_frame": 11891,
+      "end_frame": 13791
+    },
+    {
+      "id": "scene_0013",
+      "start": 13.791,
+      "end": 15.875,
+      "start_frame": 13791,
+      "end_frame": 15875
+    },
+    {
+      "id": "scene_0014",
+      "start": 15.875,
+      "end": 22.341,
+      "start_frame": 15875,
+      "end_frame": 22341
+    },
+    {
+      "id": "scene_0015",
+      "start": 22.341,
+      "end": 28.875,
+      "start_frame": 22341,
+      "end_frame": 28875
+    },
+    {
+      "id": "scene_0016",
+      "start": 28.875,
+      "end": 32.666,
+      "start_frame": 28875,
+      "end_frame": 32666
+    },
+    {
+      "id": "scene_0017",
+      "start": 32.666,
+      "end": 33.658,
+      "start_frame": 32666,
+      "end_frame": 33658
+    },
+    {
+      "id": "scene_0018",
+      "start": 33.658,
+      "end": 38.898,
+      "start_frame": 33658,
+      "end_frame": 38898
+    },
+    {
+      "id": "scene_0019",
+      "start": 38.898,
+      "end": 42.875,
+      "start_frame": 38898,
+      "end_frame": 42875
+    },
+    {
+      "id": "scene_0020",
+      "start": 42.875,
+      "end": 51.691,
+      "start_frame": 42875,
+      "end_frame": 51691
+    },
+    {
+      "id": "scene_0021",
+      "start": 51.691,
+      "end": 51.924,
+      "start_frame": 51691,
+      "end_frame": 51924
+    },
+    {
+      "id": "scene_0022",
+      "start": 51.924,
+      "end": 54.524,
+      "start_frame": 51924,
+      "end_frame": 54524
+    },
+    {
+      "id": "scene_0023",
+      "start": 54.524,
+      "end": 57.708,
+      "start_frame": 54524,
+      "end_frame": 57708
+    },
+    {
+      "id": "scene_0024",
+      "start": 57.708,
+      "end": 58.441,
+      "start_frame": 57708,
+      "end_frame": 58441
+    },
+    {
+      "id": "scene_0025",
+      "start": 58.441,
+      "end": 59.541,
+      "start_frame": 58441,
+      "end_frame": 59541
+    },
+    {
+      "id": "scene_0026",
+      "start": 59.541,
+      "end": 64.241,
+      "start_frame": 59541,
+      "end_frame": 64241
+    },
+    {
+      "id": "scene_0027",
+      "start": 64.241,
+      "end": 71.924,
+      "start_frame": 64241,
+      "end_frame": 71924
+    },
+    {
+      "id": "scene_0028",
+      "start": 71.924,
+      "end": 73.191,
+      "start_frame": 71924,
+      "end_frame": 73191
+    },
+    {
+      "id": "scene_0029",
+      "start": 73.191,
+      "end": 76.691,
+      "start_frame": 73191,
+      "end_frame": 76691
+    },
+    {
+      "id": "scene_0030",
+      "start": 76.691,
+      "end": 77.158,
+      "start_frame": 76691,
+      "end_frame": 77158
+    },
+    {
+      "id": "scene_0031",
+      "start": 77.158,
+      "end": 78.158,
+      "start_frame": 77158,
+      "end_frame": 78158
+    },
+    {
+      "id": "scene_0032",
+      "start": 78.158,
+      "end": 79.591,
+      "start_frame": 78158,
+      "end_frame": 79591
+    },
+    {
+      "id": "scene_0033",
+      "start": 79.591,
+      "end": 80.763,
+      "start_frame": 79591,
+      "end_frame": 80763
+    },
+    {
+      "id": "scene_0034",
+      "start": 80.763,
+      "end": 82.291,
+      "start_frame": 80763,
+      "end_frame": 82291
+    },
+    {
+      "id": "scene_0035",
+      "start": 82.291,
+      "end": 83.824,
+      "start_frame": 82291,
+      "end_frame": 83824
+    },
+    {
+      "id": "scene_0036",
+      "start": 83.824,
+      "end": 85.024,
+      "start_frame": 83824,
+      "end_frame": 85024
+    },
+    {
+      "id": "scene_0037",
+      "start": 85.024,
+      "end": 86.841,
+      "start_frame": 85024,
+      "end_frame": 86841
+    },
+    {
+      "id": "scene_0038",
+      "start": 86.841,
+      "end": 89.257,
+      "start_frame": 86841,
+      "end_frame": 89257
+    },
+    {
+      "id": "scene_0039",
+      "start": 89.257,
+      "end": 91.508,
+      "start_frame": 89257,
+      "end_frame": 91508
+    },
+    {
+      "id": "scene_0040",
+      "start": 91.508,
+      "end": 93.641,
+      "start_frame": 91508,
+      "end_frame": 93641
+    },
+    {
+      "id": "scene_0041",
+      "start": 93.641,
+      "end": 94.408,
+      "start_frame": 93641,
+      "end_frame": 94408
+    },
+    {
+      "id": "scene_0042",
+      "start": 94.408,
+      "end": 95.543,
+      "start_frame": 94408,
+      "end_frame": 95543
+    },
+    {
+      "id": "scene_0043",
+      "start": 95.543,
+      "end": 95.748,
+      "start_frame": 95543,
+      "end_frame": 95748
+    },
+    {
+      "id": "scene_0044",
+      "start": 95.748,
+      "end": 96.175,
+      "start_frame": 95748,
+      "end_frame": 96175
+    },
+    {
+      "id": "scene_0045",
+      "start": 96.175,
+      "end": 96.475,
+      "start_frame": 96175,
+      "end_frame": 96475
+    },
+    {
+      "id": "scene_0046",
+      "start": 96.475,
+      "end": 102.241,
+      "start_frame": 96475,
+      "end_frame": 102241
+    },
+    {
+      "id": "scene_0047",
+      "start": 102.241,
+      "end": 104.208,
+      "start_frame": 102241,
+      "end_frame": 104208
+    },
+    {
+      "id": "scene_0048",
+      "start": 104.208,
+      "end": 107.174,
+      "start_frame": 104208,
+      "end_frame": 107174
+    },
+    {
+      "id": "scene_0049",
+      "start": 107.174,
+      "end": 107.674,
+      "start_frame": 107174,
+      "end_frame": 107674
+    },
+    {
+      "id": "scene_0050",
+      "start": 107.674,
+      "end": 110.524,
+      "start_frame": 107674,
+      "end_frame": 110524
+    },
+    {
+      "id": "scene_0051",
+      "start": 110.524,
+      "end": 110.857,
+      "start_frame": 110524,
+      "end_frame": 110857
+    },
+    {
+      "id": "scene_0052",
+      "start": 110.857,
+      "end": 112.624,
+      "start_frame": 110857,
+      "end_frame": 112624
+    },
+    {
+      "id": "scene_0053",
+      "start": 112.624,
+      "end": 117.291,
+      "start_frame": 112624,
+      "end_frame": 117291
+    },
+    {
+      "id": "scene_0054",
+      "start": 117.291,
+      "end": 117.874,
+      "start_frame": 117291,
+      "end_frame": 117874
+    },
+    {
+      "id": "scene_0055",
+      "start": 117.874,
+      "end": 120.062,
+      "start_frame": 117874,
+      "end_frame": 1807
+    }
+  ]
+}

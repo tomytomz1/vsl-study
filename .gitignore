@@ -21,6 +21,9 @@ output/
 *.zip
 *.srt
 
+# Keep the checked-in live capture sample, including extracted audio.
+!vsl-study/samples/vsl-study-tests/cache/audio.wav
+
 # Model downloads and caches
 .cache/
 **/whisper_cache/

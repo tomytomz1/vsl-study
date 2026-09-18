@@ -1,0 +1,20 @@
+{
+  "status": "failed",
+  "cache_key": "b01e5aa26fac2c3442df1dad7358a00fbd527104126d05294ee12a15561bfc2c|small.en|en|transcribe",
+  "transcript": {
+    "status": "failed",
+    "model": "small.en",
+    "language": "en",
+    "language_source": "n/a",
+    "device": "cpu",
+    "device_note": "CUDA not available or not supported; using CPU (fp32). This is not real-time.",
+    "segments": [],
+    "text": "",
+    "flags": [
+      "transcription_failed"
+    ],
+    "error": "'NoneType' object has no attribute 'write'",
+    "diagnostics_note": "avg_logprob, no_speech_prob, and compression_ratio are raw decoder diagnostics, not calibrated accuracy percentages."
+  },
+  "traceback": "Traceback (most recent call last):\n  File \"C:\\Users\\Tomas\\Yu Sleep VSL\\vsl-study\\src\\vsl_study\\pipeline.py\", line 321, in _stage_transcribe\n    result = transcribe_wav(str(wav), settings, progress=progress)\n             ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^\n  File \"C:\\Users\\Tomas\\Yu Sleep VSL\\vsl-study\\src\\vsl_study\\transcribe.py\", line 131, in transcribe_wav\n    result = model.transcribe(wav_path, **decode)\n             ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^\n  File \"C:\\Users\\Tomas\\Yu Sleep VSL\\vsl-study\\.venv\\Lib\\site-packages\\whisper\\transcribe.py\", line 264, in transcribe\n    with tqdm.tqdm(\n         ^^^^^^^^^^\n  File \"C:\\Users\\Tomas\\Yu Sleep VSL\\vsl-study\\.venv\\Lib\\site-packages\\tqdm\\std.py\", line 1103, in __init__\n    self.refresh(lock_args=self.lock_args)\n  File \"C:\\Users\\Tomas\\Yu Sleep VSL\\vsl-study\\.venv\\Lib\\site-packages\\tqdm\\std.py\", line 1354, in refresh\n    self.display()\n  File \"C:\\Users\\Tomas\\Yu Sleep VSL\\vsl-study\\.venv\\Lib\\site-packages\\tqdm\\std.py\", line 1502, in display\n    self.sp(self.__str__() if msg is None else msg)\n  File \"C:\\Users\\Tomas\\Yu Sleep VSL\\vsl-study\\.venv\\Lib\\site-packages\\tqdm\\std.py\", line 457, in print_status\n    fp_write('\\r' + s + (' ' * max(last_len[0] - len_s, 0)))\n  File \"C:\\Users\\Tomas\\Yu Sleep VSL\\vsl-study\\.venv\\Lib\\site-packages\\tqdm\\std.py\", line 450, in fp_write\n    fp.write(str(s))\n    ^^^^^^^^\n  File \"C:\\Users\\Tomas\\Yu Sleep VSL\\vsl-study\\.venv\\Lib\\site-packages\\tqdm\\utils.py\", line 123, in __getattr__\n    return getattr(self._wrapped, name)\n           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^\nAttributeError: 'NoneType' object has no attribute 'write'\n"
+}
