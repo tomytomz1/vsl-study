@@ -30,6 +30,7 @@ MAX_CHUNK = 16 * 1024 * 1024
 # avoids cancelling an ordinary recording while the user watches another tab.
 DEFAULT_LEASE_SECONDS = 180.0
 DEFAULT_LEASE_CHECK_INTERVAL = 1.0
+STALE_PAGE_MESSAGE = "This recording session has ended. Open a new recorder from VSL Study."
 
 
 def recorder_bytes(name: str) -> bytes:
@@ -63,37 +64,72 @@ class CaptureHTTPServer(ThreadingHTTPServer):
         self.lease_seconds = float(lease_seconds)
         self.lease_check_interval = float(lease_check_interval)
         self.publish = publish
-        self.life_lock = threading.Lock()
+        self.life_lock = threading.RLock()
         self.last_beat = time.monotonic()
         self.page_expected = False
         self.page_generation = 0
         self.abandon_emitted = False
+        self._test_pause: Callable[[str], None] | None = None
 
     def beat(self) -> None:
         with self.life_lock:
             self.last_beat = time.monotonic()
 
-    def note_expected_client(self) -> int:
+    def _stale(self) -> CaptureError:
+        return CaptureError("stale_generation", STALE_PAGE_MESSAGE)
+
+    def require_live_generation(self, generation: int | None, *, beat: bool = False) -> int:
+        if generation is None:
+            raise self._stale()
         with self.life_lock:
+            if self._test_pause:
+                self._test_pause("require_live")
+            if self.cancelled:
+                raise CaptureError("cancelled", "The desktop app is no longer capturing.")
+            if not self.page_expected or int(generation) != int(self.page_generation):
+                raise self._stale()
+            if beat:
+                self.last_beat = time.monotonic()
+            return int(generation)
+
+    def note_expected_client(self) -> int:
+        prev: int | None = None
+        with self.life_lock:
+            if self._test_pause:
+                self._test_pause("note_locked")
+            if self.page_expected and self.page_generation:
+                prev = int(self.page_generation)
             self.page_generation += 1
             self.page_expected = True
             self.abandon_emitted = False
             self.last_beat = time.monotonic()
-            return self.page_generation
+            new_gen = int(self.page_generation)
+        if prev is not None:
+            self.registry.cancel_generation(prev, "superseded")
+            cb = self.on_event
+            if cb:
+                cb("capture_abandoned", {"reason": "superseded", "generation": prev})
+        return new_gen
 
-    def abandon_page(self, reason: str) -> bool:
+    def abandon_page(self, reason: str, generation: int | None = None) -> bool:
         with self.life_lock:
+            if self._test_pause:
+                self._test_pause("abandon_locked")
+            if generation is None:
+                return False
+            if int(generation) != int(self.page_generation):
+                return False
             if self.abandon_emitted and not self.page_expected:
                 return False
             if not self.page_expected:
                 return False
-            generation = self.page_generation
+            target = int(self.page_generation)
             self.page_expected = False
             self.abandon_emitted = True
-        self.registry.cancel_all(reason)
+        self.registry.cancel_generation(target, reason)
         cb = self.on_event
         if cb:
-            cb("capture_abandoned", {"reason": reason, "generation": generation})
+            cb("capture_abandoned", {"reason": reason, "generation": target})
         return True
 
     def check_lease(self, now: float | None = None) -> bool:
@@ -103,7 +139,8 @@ class CaptureHTTPServer(ThreadingHTTPServer):
                 return False
             if stamp - self.last_beat <= self.lease_seconds:
                 return False
-        return self.abandon_page("abandoned")
+            generation = int(self.page_generation)
+        return self.abandon_page("abandoned", generation=generation)
 
 
 class CaptureHandler(BaseHTTPRequestHandler):
@@ -159,16 +196,24 @@ class CaptureHandler(BaseHTTPRequestHandler):
             raise CaptureError("too_large", "Request body is too large.")
         return self.rfile.read(length)
 
-    def _emit(self, kind: str, payload: dict[str, Any]) -> None:
+    def _emit(self, kind: str, payload: dict[str, Any], *, generation: int) -> None:
         body = dict(payload)
-        body.setdefault("generation", self.server.page_generation)
+        body["generation"] = int(generation)
         cb = self.server.on_event
         if cb:
             cb(kind, body)
 
     def _error(self, exc: CaptureError) -> None:
         status = 400
-        if exc.code in {"gap", "conflict", "finalized", "cancelled", "backpressure", "missing_final"}:
+        if exc.code in {
+            "gap",
+            "conflict",
+            "finalized",
+            "cancelled",
+            "backpressure",
+            "missing_final",
+            "stale_generation",
+        }:
             status = 409
         elif exc.code == "too_large":
             status = 413
@@ -178,7 +223,40 @@ class CaptureHandler(BaseHTTPRequestHandler):
             status = 401
         elif exc.code == "storage_failed":
             status = 500
-        self._json(status, {"error": exc.code, "message": exc.message, "complete": False, "process": False})
+        payload: dict[str, Any] = {"error": exc.code, "message": exc.message, "complete": False, "process": False}
+        if exc.code == "stale_generation":
+            payload["stale"] = True
+        self._json(status, payload)
+
+    def _client_generation(self, body: dict[str, Any] | None = None) -> int | None:
+        header = (self.headers.get("X-VSL-Generation") or "").strip()
+        raw = header
+        if not raw:
+            query = parse_qs(urlparse(self.path).query)
+            raw = (query.get("g") or [""])[0]
+        if not raw and body is not None and body.get("generation") is not None:
+            raw = str(body.get("generation"))
+        if not raw:
+            return None
+        try:
+            value = int(raw)
+        except (TypeError, ValueError) as exc:
+            raise CaptureError("stale_generation", STALE_PAGE_MESSAGE) from exc
+        if value < 1:
+            raise CaptureError("stale_generation", STALE_PAGE_MESSAGE)
+        return value
+
+    def _require_live(self, body: dict[str, Any] | None = None, *, beat: bool = False) -> int:
+        return self.server.require_live_generation(self._client_generation(body), beat=beat)
+
+    def _require_session(self, rec_id: str, body: dict[str, Any] | None = None, *, beat: bool = False):
+        generation = self._require_live(body, beat=False)
+        session = self.server.registry.get(rec_id)
+        if session.generation is None or int(session.generation) != int(generation):
+            raise CaptureError("stale_generation", STALE_PAGE_MESSAGE)
+        if beat:
+            self.server.beat()
+        return session, generation
 
     def do_GET(self) -> None:  # noqa: N802
         if not self._origin_ok():
@@ -193,21 +271,39 @@ class CaptureHandler(BaseHTTPRequestHandler):
             if path == "/api/session":
                 if not self._token_ok():
                     raise CaptureError("unauthorized", "Missing capture token.")
-                self.server.beat()
+                generation = self._client_generation()
+                stale = True
+                try:
+                    live = self.server.require_live_generation(generation, beat=True)
+                    stale = False
+                except CaptureError as exc:
+                    if exc.code not in {"stale_generation", "cancelled"}:
+                        raise
+                    live = generation
                 self._json(
                     200,
                     {
                         "ok": True,
                         "cancelled": self.server.cancelled,
-                        "page_expected": self.server.page_expected,
+                        "page_expected": self.server.page_expected and not stale,
                         "lease_seconds": self.server.lease_seconds,
+                        "generation": generation,
+                        "current_generation": self.server.page_generation,
+                        "stale": stale or self.server.cancelled,
+                        "message": STALE_PAGE_MESSAGE if stale or self.server.cancelled else "",
                     },
                 )
                 return
             if path in {"/recorder", "/"}:
                 if not self._token_ok():
                     raise CaptureError("unauthorized", "Missing capture token.")
-                self.server.beat()
+                generation = self._client_generation()
+                if generation is not None:
+                    try:
+                        self.server.require_live_generation(generation, beat=True)
+                    except CaptureError as exc:
+                        if exc.code not in {"stale_generation", "cancelled"}:
+                            raise
                 self._bytes(200, recorder_bytes("index.html"), "text/html; charset=utf-8")
                 return
             if path == "/recorder.js":
@@ -273,20 +369,34 @@ class CaptureHandler(BaseHTTPRequestHandler):
             self._json(400, {"error": "json", "message": "Request was not valid JSON."})
 
     def _heartbeat(self) -> None:
-        self._read_body(MAX_JSON)
-        self.server.beat()
+        raw = self._read_body(MAX_JSON)
+        body = json.loads(raw or b"{}") if raw else {}
+        if not isinstance(body, dict):
+            body = {}
+        self._require_live(body, beat=True)
         self._json(200, {"ok": True, "lease_seconds": self.server.lease_seconds})
 
     def _cancel_page(self) -> None:
-        self._read_body(MAX_JSON)
-        emitted = self.server.abandon_page("client_cancel")
-        self._json(200, {"ok": True, "emitted": emitted})
+        raw = self._read_body(MAX_JSON)
+        body = json.loads(raw or b"{}") if raw else {}
+        if not isinstance(body, dict):
+            body = {}
+        generation = self._client_generation(body)
+        if generation is None:
+            raise CaptureError("stale_generation", STALE_PAGE_MESSAGE)
+        emitted = self.server.abandon_page("client_cancel", generation=generation)
+        if not emitted:
+            raise CaptureError("stale_generation", STALE_PAGE_MESSAGE)
+        self._json(200, {"ok": True, "emitted": True, "generation": generation})
 
     def _create(self) -> None:
         raw = self._read_body(MAX_JSON)
         body = json.loads(raw or b"{}")
+        if not isinstance(body, dict):
+            body = {}
+        generation = self._require_live(body, beat=True)
         rec_id = uuid.uuid4().hex
-        session = self.server.registry.create(rec_id)
+        session = self.server.registry.create(rec_id, generation=generation)
         max_dur = body.get("max_duration_s")
         try:
             max_duration_s = float(max_dur) if max_dur not in (None, "", 0, "0") else None
@@ -298,9 +408,8 @@ class CaptureHandler(BaseHTTPRequestHandler):
             mime_type=str(body.get("mime_type") or ""),
             max_duration_s=max_duration_s,
         )
-        self.server.beat()
-        self._emit("capture_created", {"id": rec_id})
-        self._json(200, {"id": rec_id, "created_at": session.created_at})
+        self._emit("capture_created", {"id": rec_id}, generation=generation)
+        self._json(200, {"id": rec_id, "created_at": session.created_at, "generation": generation})
 
     def _chunk(self, rec_id: str, seq_s: str) -> None:
         try:
@@ -308,23 +417,29 @@ class CaptureHandler(BaseHTTPRequestHandler):
         except ValueError as exc:
             raise CaptureError("bad_seq", "Chunk sequence must be an integer.") from exc
         data = self._read_body(MAX_CHUNK)
-        session = self.server.registry.get(rec_id)
+        session, generation = self._require_session(rec_id, beat=True)
         checksum = (self.headers.get("X-Content-SHA256") or "").strip() or sha256_hex(data)
         last = (self.headers.get("X-Last-Chunk") or "").lower() in {"1", "true", "yes"}
         result = session.write_chunk(seq, data, checksum, last=last)
-        self.server.beat()
+        result["generation"] = generation
         self._json(200, result)
 
     def _cancel(self, rec_id: str) -> None:
-        session = self.server.registry.get(rec_id)
+        raw = self._read_body(MAX_JSON)
+        body = json.loads(raw or b"{}") if raw else {}
+        if not isinstance(body, dict):
+            body = {}
+        session, generation = self._require_session(rec_id, body)
         session.cancel("client_cancel")
         if session.try_notify_incomplete():
-            self._emit("capture_incomplete", {"id": rec_id, "stop_reason": "client_cancel"})
-        self._json(200, {"ok": True})
+            self._emit("capture_incomplete", {"id": rec_id, "stop_reason": "client_cancel"}, generation=generation)
+        self._json(200, {"ok": True, "generation": generation})
 
     def _finalize(self, rec_id: str) -> None:
-        session = self.server.registry.get(rec_id)
         body = json.loads(self._read_body(MAX_JSON) or b"{}")
+        if not isinstance(body, dict):
+            body = {}
+        session, generation = self._require_session(rec_id, body)
         stop_reason = str(body.get("stop_reason") or "user_stop")
         capture_file = session.dir / "capture.json"
         with session.assemble_lock:
@@ -346,6 +461,7 @@ class CaptureHandler(BaseHTTPRequestHandler):
                             "capture": existing,
                             "duplicate": True,
                         },
+                        generation=generation,
                     )
                 self._json(
                     200,
@@ -362,7 +478,11 @@ class CaptureHandler(BaseHTTPRequestHandler):
                 session.cancel("no_audio_track")
                 message = "No audio track. Choose the tab again and turn on sharing that tab's sound."
                 if session.try_notify_incomplete():
-                    self._emit("capture_incomplete", {"id": rec_id, "stop_reason": "no_audio_track", "message": message})
+                    self._emit(
+                        "capture_incomplete",
+                        {"id": rec_id, "stop_reason": "no_audio_track", "message": message},
+                        generation=generation,
+                    )
                 self._json(409, {"error": "no_audio_track", "message": message, "complete": False, "process": False})
                 return
             info = session.begin_finalize(stop_reason)
@@ -379,6 +499,7 @@ class CaptureHandler(BaseHTTPRequestHandler):
                         self._emit(
                             "capture_incomplete",
                             {"id": rec_id, "stop_reason": "storage_failed", "message": message},
+                            generation=generation,
                         )
                     self._json(
                         500,
@@ -423,13 +544,14 @@ class CaptureHandler(BaseHTTPRequestHandler):
             atomic_write_json(capture_file, record)
             process = should_process(stop_reason, complete, audio_ok)
             payload = {"id": rec_id, "path": str(used_path), "capture": record, "duplicate": bool(info.get("already"))}
+            emit_generation = int(session.generation) if session.generation is not None else generation
             if process:
                 if session.try_begin_processing():
-                    self._emit("capture_ready", payload)
+                    self._emit("capture_ready", payload, generation=emit_generation)
                 else:
                     process = False
             elif session.try_notify_incomplete():
-                self._emit("capture_incomplete", payload)
+                self._emit("capture_incomplete", payload, generation=emit_generation)
             self._json(
                 200,
                 {
@@ -473,7 +595,8 @@ class CaptureServer:
 
     @property
     def recorder_url(self) -> str:
-        return f"http://127.0.0.1:{self.port}/recorder?token={self.token}"
+        generation = int(self.httpd.page_generation) if self.httpd else 0
+        return f"http://127.0.0.1:{self.port}/recorder?token={self.token}&g={generation}"
 
     @property
     def page_expected(self) -> bool:
@@ -496,10 +619,10 @@ class CaptureServer:
             return False
         return self.httpd.check_lease(now)
 
-    def abandon_page(self, reason: str) -> bool:
+    def abandon_page(self, reason: str, generation: int | None = None) -> bool:
         if not self.httpd:
             return False
-        return self.httpd.abandon_page(reason)
+        return self.httpd.abandon_page(reason, generation=generation)
 
     def start(self) -> None:
         if self.alive():

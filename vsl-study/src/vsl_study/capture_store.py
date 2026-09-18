@@ -67,6 +67,7 @@ class ChunkSession:
         *,
         max_chunk_bytes: int = 16 * 1024 * 1024,
         max_pending_bytes: int = 32 * 1024 * 1024,
+        generation: int | None = None,
     ) -> None:
         if not recording_id.isalnum() or len(recording_id) > 64:
             raise CaptureError("bad_id", "Invalid recording id.")
@@ -93,6 +94,7 @@ class ChunkSession:
         self.title = ""
         self.source_url = ""
         self.max_duration_s: float | None = None
+        self.generation: int | None = generation
         self._load()
 
     def _load(self) -> None:
@@ -117,6 +119,11 @@ class ChunkSession:
         max_dur = data.get("max_duration_s")
         self.max_duration_s = float(max_dur) if max_dur is not None else None
         self.created_at = str(data.get("created_at") or self.created_at)
+        if data.get("generation") is not None:
+            try:
+                self.generation = int(data.get("generation"))
+            except (TypeError, ValueError):
+                pass
 
     def snapshot(self) -> dict[str, Any]:
         with self.lock:
@@ -133,6 +140,7 @@ class ChunkSession:
                 "mime_type": self.mime_type,
                 "title": self.title,
                 "created_at": self.created_at,
+                "generation": self.generation,
             }
 
     def _save(self, extra: dict[str, Any] | None = None) -> None:
@@ -151,6 +159,7 @@ class ChunkSession:
             "source_url": self.source_url,
             "max_duration_s": self.max_duration_s,
             "created_at": self.created_at,
+            "generation": self.generation,
         }
         if extra:
             payload.update(extra)
@@ -302,9 +311,9 @@ class CaptureRegistry:
         self._lock = threading.Lock()
         self._sessions: dict[str, ChunkSession] = {}
 
-    def create(self, recording_id: str) -> ChunkSession:
+    def create(self, recording_id: str, generation: int | None = None) -> ChunkSession:
         with self._lock:
-            session = ChunkSession(self.root, recording_id)
+            session = ChunkSession(self.root, recording_id, generation=generation)
             self._sessions[recording_id] = session
             return session
 
@@ -319,6 +328,13 @@ class CaptureRegistry:
                 self._sessions[recording_id] = session
                 return session
             raise CaptureError("not_found", "Unknown recording.")
+
+    def cancel_generation(self, generation: int, reason: str = "cancelled") -> list[ChunkSession]:
+        with self._lock:
+            sessions = [session for session in self._sessions.values() if session.generation == generation]
+        for session in sessions:
+            session.cancel(reason)
+        return sessions
 
     def cancel_all(self, reason: str = "app_closed") -> None:
         with self._lock:

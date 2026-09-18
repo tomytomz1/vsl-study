@@ -1303,7 +1303,7 @@ class VSLStudyApp:
             return
         if self._capture_server is not None:
             try:
-                self._capture_server.abandon_page("desktop_cancel")
+                self._capture_server.abandon_page("desktop_cancel", generation=self._capture_generation)
             except Exception:
                 pass
         self.capturing = False

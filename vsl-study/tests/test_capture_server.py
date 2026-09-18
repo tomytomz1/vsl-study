@@ -12,18 +12,23 @@ def test_recorder_package_files_exist():
     assert "Stop and process" in html
     assert "Cancel recording" in html
     assert "getDisplayMedia" in js
+    assert "X-VSL-Generation" in js
     assert "audio" in js
     core = recorder_bytes("recorder-core.js").decode("utf-8")
     assert "CapturePipeline" in core
+    assert "RecorderPage" in core
+    assert "parsePageGeneration" in core
     assert "--accent" in css
 
 
-def _request(server: CaptureServer, method: str, path: str, body: bytes = b"", extra=None, token=None):
+def _request(server: CaptureServer, method: str, path: str, body: bytes = b"", extra=None, token=None, generation=None):
     import urllib.error
     import urllib.request
 
     url = f"http://127.0.0.1:{server.port}{path}"
     headers = {"X-VSL-Token": token if token is not None else server.token}
+    if generation is not None:
+        headers["X-VSL-Generation"] = str(generation)
     if extra:
         headers.update(extra)
     req = urllib.request.Request(url, data=body if method in {"POST", "PUT"} else None, method=method, headers=headers)
@@ -47,12 +52,14 @@ def test_token_and_origin_and_no_audio(tmp_path: Path):
         status, payload = _request(server, "GET", "/health", token="nope")
         assert status == 200
         assert payload["ok"] is True
+        gen = server.note_expected_client()
         status, created = _request(
             server,
             "POST",
             "/api/recordings",
             body=json.dumps({"title": "demo"}).encode(),
             extra={"Content-Type": "application/json"},
+            generation=gen,
         )
         assert status == 200
         rec_id = created["id"]
@@ -62,6 +69,7 @@ def test_token_and_origin_and_no_audio(tmp_path: Path):
             f"/api/recordings/{rec_id}/finalize",
             body=json.dumps({"stop_reason": "user_stop", "audio_track": False}).encode(),
             extra={"Content-Type": "application/json"},
+            generation=gen,
         )
         assert status == 409
         assert fail["error"] == "no_audio_track"
@@ -74,12 +82,14 @@ def test_chunk_then_duplicate_finalize_without_ffmpeg_gap(tmp_path: Path):
     server = CaptureServer(tmp_path, on_event=lambda *_a: None)
     server.start()
     try:
+        gen = server.note_expected_client()
         status, created = _request(
             server,
             "POST",
             "/api/recordings",
             body=b"{}",
             extra={"Content-Type": "application/json"},
+            generation=gen,
         )
         rec_id = created["id"]
         data = b"not-a-real-webm"
@@ -92,6 +102,7 @@ def test_chunk_then_duplicate_finalize_without_ffmpeg_gap(tmp_path: Path):
             f"/api/recordings/{rec_id}/chunks/0",
             body=data,
             extra={"X-Content-SHA256": digest, "X-Last-Chunk": "1"},
+            generation=gen,
         )
         assert status == 200
         status, fin = _request(
@@ -100,6 +111,7 @@ def test_chunk_then_duplicate_finalize_without_ffmpeg_gap(tmp_path: Path):
             f"/api/recordings/{rec_id}/finalize",
             body=json.dumps({"stop_reason": "user_stop", "audio_track": True, "mime_type": "video/webm"}).encode(),
             extra={"Content-Type": "application/json"},
+            generation=gen,
         )
         assert status == 200
         assert fin["complete"] is False
@@ -110,6 +122,7 @@ def test_chunk_then_duplicate_finalize_without_ffmpeg_gap(tmp_path: Path):
             f"/api/recordings/{rec_id}/finalize",
             body=json.dumps({"stop_reason": "user_stop", "audio_track": True}).encode(),
             extra={"Content-Type": "application/json"},
+            generation=gen,
         )
         assert status == 200
         assert fin2.get("duplicate") is True

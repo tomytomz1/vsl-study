@@ -1,8 +1,11 @@
 (() => {
   const token = new URLSearchParams(location.search).get("token") || "";
-  const headers = () => ({ "X-VSL-Token": token });
+  const Capture = window.VslCapture || {};
+  const CapturePipeline = Capture.CapturePipeline;
+  const RecorderPage = Capture.RecorderPage;
+  const parsePageGeneration = Capture.parsePageGeneration;
   const $ = (id) => document.getElementById(id);
-  const CapturePipeline = (window.VslCapture || {}).CapturePipeline;
+  const STALE_PAGE_MESSAGE = "This recording session has ended. Open a new recorder from VSL Study.";
 
   const state = {
     stream: null,
@@ -20,6 +23,30 @@
     meterContext: null,
   };
 
+  const page = new RecorderPage({
+    generation: parsePageGeneration(location.search),
+    onStopTracks: () => releasePreview(),
+    onClearTimers: () => {
+      stopHeartbeat();
+      if (state.poll) {
+        clearInterval(state.poll);
+        state.poll = null;
+      }
+      if (state.timer) {
+        clearInterval(state.timer);
+        state.timer = null;
+      }
+    },
+    onLockControls: () => lockStaleControls(),
+    onStatus: (text) => status(text),
+  });
+
+  function headers() {
+    const h = { "X-VSL-Token": token };
+    if (page.generation != null) h["X-VSL-Generation"] = String(page.generation);
+    return h;
+  }
+
   const status = (text) => { $("status").textContent = text; };
   const TYPES = [
     "video/webm;codecs=vp9,opus",
@@ -34,8 +61,21 @@
   }
 
   async function api(path, opts) {
+    if (page.ended) {
+      const err = new Error(page.message || STALE_PAGE_MESSAGE);
+      err.code = "stale_generation";
+      err.status = 409;
+      throw err;
+    }
     const res = await fetch(path, opts);
     const data = await res.json().catch(() => ({}));
+    if (data && (data.error === "stale_generation" || data.stale)) {
+      page.markEnded(data.message || STALE_PAGE_MESSAGE);
+      const err = new Error(page.message);
+      err.code = "stale_generation";
+      err.status = res.status;
+      throw err;
+    }
     if (!res.ok) {
       const err = new Error(data.message || data.error || res.statusText);
       err.code = data.error;
@@ -43,6 +83,13 @@
       throw err;
     }
     return data;
+  }
+
+  function lockStaleControls() {
+    ["open-page", "choose", "start", "stop", "cancel"].forEach((id) => {
+      const el = $(id);
+      if (el) el.disabled = true;
+    });
   }
 
   $("open-page").onclick = () => {
@@ -71,10 +118,11 @@
   }
 
   async function beat() {
+    if (!page.canMutate()) return;
     await api("/api/heartbeat", {
       method: "POST",
       headers: { ...headers(), "Content-Type": "application/json" },
-      body: JSON.stringify({ id: state.recId }),
+      body: JSON.stringify({ id: state.recId, generation: page.generation }),
     });
   }
 
@@ -82,7 +130,15 @@
     if (state.heartbeat) return;
     beat().catch(() => {});
     state.heartbeat = setInterval(() => {
-      beat().catch(() => {});
+      if (!page.canMutate()) {
+        stopHeartbeat();
+        return;
+      }
+      beat().catch((err) => {
+        if (!page.handleApiError(err)) {
+          /* keep trying until lease expiry or a stale response */
+        }
+      });
     }, 15000);
   }
 
@@ -96,13 +152,23 @@
   function watchSession() {
     if (state.poll) clearInterval(state.poll);
     state.poll = setInterval(async () => {
+      if (!page.canMutate()) {
+        if (state.poll) {
+          clearInterval(state.poll);
+          state.poll = null;
+        }
+        return;
+      }
       try {
         const s = await api("/api/session", { headers: headers() });
+        if (page.handleSessionPoll(s)) {
+          return;
+        }
         if (s.cancelled) {
-          status("VSL Study closed. Stopping capture.");
-          await abortLocal("app_closed");
+          page.markEnded("VSL Study closed. Stopping capture.");
         }
       } catch (err) {
+        if (page.handleApiError(err)) return;
         if (state.recording) {
           status("Lost the local capture service. Stopping tracks.");
           await abortLocal("service_interrupted");
@@ -142,6 +208,10 @@
   }
 
   $("choose").onclick = async () => {
+    if (!page.canMutate()) {
+      page.markEnded();
+      return;
+    }
     status("");
     if (!window.isSecureContext) {
       status("Capture needs a secure local page. This should be http://127.0.0.1 from VSL Study.");
@@ -181,6 +251,7 @@
     if (state.audioTrack) setupMeter(stream);
     stream.getVideoTracks().forEach((track) => {
       track.addEventListener("ended", () => {
+        if (page.ended) return;
         if (state.recording) requestFinish("stop_sharing");
         else status("Sharing ended. Choose the tab again to record.");
       });
@@ -203,6 +274,9 @@
 
   async function ensureSession() {
     if (state.recId) return;
+    if (!page.canMutate()) {
+      throw Object.assign(new Error(STALE_PAGE_MESSAGE), { code: "stale_generation" });
+    }
     const created = await api("/api/recordings", {
       method: "POST",
       headers: { ...headers(), "Content-Type": "application/json" },
@@ -211,8 +285,12 @@
         source_url: $("url").value,
         mime_type: state.mime,
         max_duration_s: $("limit").value ? Number($("limit").value) * 60 : null,
+        generation: page.generation,
       }),
     });
+    if (!page.bindRecording(created.id)) {
+      throw Object.assign(new Error(STALE_PAGE_MESSAGE), { code: "stale_generation" });
+    }
     state.recId = created.id;
   }
 
@@ -280,6 +358,7 @@
       state.recorder = null;
       return result;
     }).catch((err) => {
+      if (page.handleApiError(err)) return;
       status((err && err.message) || String(err));
       releasePreview();
       restoreChooser();
@@ -300,6 +379,7 @@
         audio_detected: state.audioDetected,
         title: $("title").value,
         browser: { userAgent: navigator.userAgent, vendor: navigator.vendor },
+        generation: page.generation,
       }),
     });
   }
@@ -310,7 +390,7 @@
       await api(`/api/recordings/${state.recId}/cancel`, {
         method: "POST",
         headers: { ...headers(), "Content-Type": "application/json" },
-        body: JSON.stringify({ reason }),
+        body: JSON.stringify({ reason, generation: page.generation }),
       });
     } catch (err) {
       /* session may already be gone */
@@ -336,6 +416,10 @@
   }
 
   function restoreChooser() {
+    if (page.ended) {
+      lockStaleControls();
+      return;
+    }
     $("choose").disabled = false;
     $("start").disabled = true;
     $("stop").disabled = true;
@@ -344,6 +428,10 @@
   }
 
   $("start").onclick = async () => {
+    if (!page.canMutate()) {
+      page.markEnded();
+      return;
+    }
     if (!state.stream || !state.audioTrack) {
       status("Choose a tab with audio first.");
       return;
@@ -356,7 +444,7 @@
       const rec = new MediaRecorder(state.stream, { mimeType: state.mime, videoBitsPerSecond: 2_500_000 });
       state.recorder = rec;
       rec.ondataavailable = (ev) => {
-        if (!state.pipeline) return;
+        if (!state.pipeline || page.ended || !page.canMutate()) return;
         try {
           state.pipeline.acceptMedia(ev.data);
         } catch (err) {
@@ -405,6 +493,7 @@
   }
 
   async function cancelPage() {
+    if (page.ended) return;
     $("cancel").disabled = true;
     $("stop").disabled = true;
     if (state.timer) clearInterval(state.timer);
@@ -422,7 +511,7 @@
       await api("/api/page/cancel", {
         method: "POST",
         headers: { ...headers(), "Content-Type": "application/json" },
-        body: JSON.stringify({ reason: "client_cancel" }),
+        body: JSON.stringify({ reason: "client_cancel", generation: page.generation }),
       });
     } catch (err) {
       /* desktop may already have reset */
@@ -437,14 +526,25 @@
     status("Cancelled. You can close this tab. VSL Study is ready for another recording or a local file.");
   }
 
-  $("stop").onclick = () => requestFinish("user_stop");
+  $("stop").onclick = () => {
+    if (!page.canMutate()) {
+      page.markEnded();
+      return;
+    }
+    requestFinish("user_stop");
+  };
   $("cancel").onclick = () => cancelPage();
   document.addEventListener("visibilitychange", () => {
-    if (document.visibilityState === "visible") beat().catch(() => {});
+    if (page.ended) return;
+    if (document.visibilityState === "visible") beat().catch((err) => page.handleApiError(err));
   });
   window.addEventListener("pagehide", () => {
     releasePreview();
   });
-  startHeartbeat();
-  watchSession();
+  if (page.generation == null) {
+    page.markEnded(STALE_PAGE_MESSAGE);
+  } else {
+    startHeartbeat();
+    watchSession();
+  }
 })();

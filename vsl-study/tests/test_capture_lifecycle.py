@@ -9,12 +9,14 @@ from vsl_study.capture_server import CaptureServer
 from vsl_study.capture_store import publish_recording
 
 
-def _request(server: CaptureServer, method: str, path: str, body: bytes = b"", extra=None, token=None):
+def _request(server: CaptureServer, method: str, path: str, body: bytes = b"", extra=None, token=None, generation=None):
     import urllib.error
     import urllib.request
 
     url = f"http://127.0.0.1:{server.port}{path}"
     headers = {"X-VSL-Token": token if token is not None else server.token}
+    if generation is not None:
+        headers["X-VSL-Generation"] = str(generation)
     if extra:
         headers.update(extra)
     req = urllib.request.Request(url, data=body if method in {"POST", "PUT"} else None, method=method, headers=headers)
@@ -28,15 +30,23 @@ def _request(server: CaptureServer, method: str, path: str, body: bytes = b"", e
         return exc.code, payload
 
 
-def _create_and_write(server: CaptureServer, data: bytes = b"not-a-real-webm", last: bool = True) -> str:
+def _live_generation(server: CaptureServer) -> int:
+    if not server.page_expected:
+        return server.note_expected_client()
+    return int(server.httpd.page_generation)
+
+
+def _create_and_write(server: CaptureServer, data: bytes = b"not-a-real-webm", last: bool = True, generation: int | None = None) -> str:
+    generation = _live_generation(server) if generation is None else generation
     status, created = _request(
         server,
         "POST",
         "/api/recordings",
         body=b"{}",
         extra={"Content-Type": "application/json"},
+        generation=generation,
     )
-    assert status == 200
+    assert status == 200, created
     rec_id = created["id"]
     digest = hashlib.sha256(data).hexdigest()
     status, _ack = _request(
@@ -45,8 +55,9 @@ def _create_and_write(server: CaptureServer, data: bytes = b"not-a-real-webm", l
         f"/api/recordings/{rec_id}/chunks/0",
         body=data,
         extra={"X-Content-SHA256": digest, "X-Last-Chunk": "1" if last else "0"},
+        generation=generation,
     )
-    assert status == 200
+    assert status == 200, _ack
     if not last:
         empty = b""
         status, _marker = _request(
@@ -55,6 +66,7 @@ def _create_and_write(server: CaptureServer, data: bytes = b"not-a-real-webm", l
             f"/api/recordings/{rec_id}/chunks/1",
             body=empty,
             extra={"X-Content-SHA256": hashlib.sha256(empty).hexdigest(), "X-Last-Chunk": "1"},
+            generation=generation,
         )
         assert status == 200
     return rec_id
@@ -88,7 +100,7 @@ def test_heartbeat_expiration_during_recording(tmp_path: Path):
         session = server.registry.get(rec_id)
         assert session.bytes_written > 0
         assert session.cancelled is False
-        status, _beat = _request(server, "POST", "/api/heartbeat", body=b"{}", extra={"Content-Type": "application/json"})
+        status, _beat = _request(server, "POST", "/api/heartbeat", body=b"{}", extra={"Content-Type": "application/json"}, generation=_live_generation(server))
         assert status == 200
         expired = server.check_lease(now=time.monotonic() + 10)
         assert expired is True
@@ -157,6 +169,7 @@ def test_concurrent_finalize_emits_processing_once(tmp_path: Path, monkeypatch):
                 f"/api/recordings/{rec_id}/finalize",
                 body=json.dumps({"stop_reason": "user_stop", "audio_track": True, "mime_type": "video/webm"}).encode(),
                 extra={"Content-Type": "application/json"},
+                generation=_live_generation(server),
             )
             results.append((status, payload))
 
@@ -194,6 +207,7 @@ def test_finalize_does_not_read_whole_file(tmp_path: Path, monkeypatch):
             f"/api/recordings/{rec_id}/finalize",
             body=json.dumps({"stop_reason": "user_stop", "audio_track": True, "mime_type": "video/webm"}).encode(),
             extra={"Content-Type": "application/json"},
+            generation=_live_generation(server),
         )
         assert status == 200
         assert payload["process"] is False
@@ -222,6 +236,7 @@ def test_copy_failure_keeps_partial_and_reports_incomplete(tmp_path: Path):
             f"/api/recordings/{rec_id}/finalize",
             body=json.dumps({"stop_reason": "user_stop", "audio_track": True, "mime_type": "video/webm"}).encode(),
             extra={"Content-Type": "application/json"},
+            generation=_live_generation(server),
         )
         assert status == 500
         assert payload["error"] == "storage_failed"
@@ -239,13 +254,27 @@ def test_page_cancel_is_idempotent(tmp_path: Path):
     server = CaptureServer(tmp_path, on_event=lambda k, p: events.append((k, p)))
     server.start()
     try:
-        server.note_expected_client()
-        status, first = _request(server, "POST", "/api/page/cancel", body=b"{}", extra={"Content-Type": "application/json"})
+        gen = server.note_expected_client()
+        status, first = _request(
+            server,
+            "POST",
+            "/api/page/cancel",
+            body=b"{}",
+            extra={"Content-Type": "application/json"},
+            generation=gen,
+        )
         assert status == 200
         assert first["emitted"] is True
-        status, second = _request(server, "POST", "/api/page/cancel", body=b"{}", extra={"Content-Type": "application/json"})
-        assert status == 200
-        assert second["emitted"] is False
+        status, second = _request(
+            server,
+            "POST",
+            "/api/page/cancel",
+            body=b"{}",
+            extra={"Content-Type": "application/json"},
+            generation=gen,
+        )
+        assert status == 409
+        assert second["error"] == "stale_generation"
         assert len([item for item in events if item[0] == "capture_abandoned"]) == 1
     finally:
         server.stop()
@@ -268,6 +297,7 @@ def test_publish_helper_is_used_by_server(tmp_path: Path):
             f"/api/recordings/{rec_id}/finalize",
             body=json.dumps({"stop_reason": "user_stop", "audio_track": True, "mime_type": "video/webm"}).encode(),
             extra={"Content-Type": "application/json"},
+            generation=_live_generation(server),
         )
         assert copied
     finally:

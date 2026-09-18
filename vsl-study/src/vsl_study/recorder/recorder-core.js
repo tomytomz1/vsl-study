@@ -298,5 +298,107 @@
       });
   };
 
-  return { CapturePipeline: CapturePipeline, CaptureError: CaptureError };
+  function parsePageGeneration(search) {
+    var params;
+    try {
+      params = new URLSearchParams(search || "");
+    } catch (err) {
+      return null;
+    }
+    var raw = params.get("g");
+    if (raw == null || raw === "") {
+      return null;
+    }
+    var value = Number(raw);
+    if (!isFinite(value) || value < 1 || Math.floor(value) !== value) {
+      return null;
+    }
+    return value;
+  }
+
+  var STALE_PAGE_MESSAGE = "This recording session has ended. Open a new recorder from VSL Study.";
+
+  function RecorderPage(options) {
+    options = options || {};
+    this.generation = options.generation != null ? options.generation : null;
+    this.ended = false;
+    this.recId = null;
+    this.message = "";
+    this.tracksStopped = 0;
+    this.timersCleared = 0;
+    this.controlsLocked = false;
+    this.unhandled = [];
+    this.onStopTracks = options.onStopTracks || function () {};
+    this.onClearTimers = options.onClearTimers || function () {};
+    this.onLockControls = options.onLockControls || function () {};
+    this.onStatus = options.onStatus || function () {};
+  }
+
+  RecorderPage.prototype.canMutate = function () {
+    return !this.ended && this.generation != null;
+  };
+
+  RecorderPage.prototype.markEnded = function (message) {
+    if (this.ended) {
+      return { already: true, message: this.message };
+    }
+    this.ended = true;
+    this.controlsLocked = true;
+    this.message = message || STALE_PAGE_MESSAGE;
+    this.timersCleared += 1;
+    this.tracksStopped += 1;
+    try {
+      this.onClearTimers();
+    } catch (err) {
+      this.unhandled.push(err);
+    }
+    try {
+      this.onStopTracks();
+    } catch (err) {
+      this.unhandled.push(err);
+    }
+    try {
+      this.onLockControls();
+    } catch (err) {
+      this.unhandled.push(err);
+    }
+    try {
+      this.onStatus(this.message);
+    } catch (err) {
+      this.unhandled.push(err);
+    }
+    return { already: false, message: this.message };
+  };
+
+  RecorderPage.prototype.bindRecording = function (id) {
+    if (!this.canMutate()) {
+      return false;
+    }
+    this.recId = id;
+    return true;
+  };
+
+  RecorderPage.prototype.handleApiError = function (err) {
+    var code = err && err.code;
+    if (code === "stale_generation" || code === "superseded") {
+      this.markEnded((err && err.message) || STALE_PAGE_MESSAGE);
+      return true;
+    }
+    return false;
+  };
+
+  RecorderPage.prototype.handleSessionPoll = function (payload) {
+    payload = payload || {};
+    if (payload.cancelled || payload.stale) {
+      this.markEnded(payload.message || STALE_PAGE_MESSAGE);
+      return true;
+    }
+    if (payload.current_generation != null && Number(payload.current_generation) !== Number(this.generation)) {
+      this.markEnded(STALE_PAGE_MESSAGE);
+      return true;
+    }
+    return false;
+  };
+
+  return { CapturePipeline: CapturePipeline, CaptureError: CaptureError, RecorderPage: RecorderPage, parsePageGeneration: parsePageGeneration };
 });

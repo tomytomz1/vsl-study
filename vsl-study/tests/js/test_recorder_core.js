@@ -218,3 +218,48 @@ test("recorder error and stop sharing follow the intended lifecycle", async () =
   assert.equal(shareResult.process, false);
   assert.equal(mediaText(shared._saved), "A");
 });
+
+test("page generation is read from the opener URL and is not adopted later", () => {
+  const { parsePageGeneration, RecorderPage } = require(path.resolve(__dirname, "../../src/vsl_study/recorder/recorder-core.js"));
+  assert.equal(parsePageGeneration("?token=abc&g=4"), 4);
+  assert.equal(parsePageGeneration("?g=1"), 1);
+  assert.equal(parsePageGeneration("?token=abc"), null);
+  assert.equal(parsePageGeneration("?g=current"), null);
+  const page = new RecorderPage({ generation: parsePageGeneration("?token=x&g=1") });
+  const stale = page.handleSessionPoll({ stale: false, generation: 1, current_generation: 2 });
+  assert.equal(stale, true);
+  assert.equal(page.ended, true);
+  assert.equal(page.generation, 1);
+});
+
+test("stale recorder page stops tracks and delayed callbacks cannot mutate another session", async () => {
+  const { RecorderPage } = require(path.resolve(__dirname, "../../src/vsl_study/recorder/recorder-core.js"));
+  const rejections = [];
+  const onUnhandled = (err) => rejections.push(err);
+  process.on("unhandledRejection", onUnhandled);
+  try {
+    const pageB = new RecorderPage({ generation: 2 });
+    assert.equal(pageB.bindRecording("rec-b"), true);
+    const pageA = new RecorderPage({ generation: 1 });
+    assert.equal(pageA.bindRecording("rec-a"), true);
+    pageA.markEnded("This recording session has ended. Open a new recorder from VSL Study.");
+    assert.equal(pageA.canMutate(), false);
+    assert.equal(pageA.controlsLocked, true);
+    assert.equal(pageA.tracksStopped, 1);
+    assert.match(pageA.message, /ended/);
+    const delayed = Promise.resolve().then(() => {
+      if (pageA.canMutate()) {
+        pageB.bindRecording("hijack");
+      }
+      return pageA.bindRecording("still-a");
+    });
+    const bound = await delayed;
+    assert.equal(bound, false);
+    assert.equal(pageB.recId, "rec-b");
+    assert.equal(pageB.canMutate(), true);
+    await new Promise((resolve) => setTimeout(resolve, 20));
+    assert.equal(rejections.length, 0);
+  } finally {
+    process.off("unhandledRejection", onUnhandled);
+  }
+});
