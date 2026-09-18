@@ -1,0 +1,4 @@
+# On-screen text from screenshots (OCR).
+# This is separate from the spoken Whisper transcript. It is not calibrated accuracy.
+
+OCR was turned off for this job.
