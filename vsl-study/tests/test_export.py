@@ -1,12 +1,15 @@
+import hashlib
 import json
 import zipfile
 from pathlib import Path
 
 import pytest
 
+from conftest import requires_ffmpeg, write_color_video
 from vsl_study.cache import JobDir, atomic_write_text
 from vsl_study.export import write_five_minute_folders, write_zip
-from vsl_study.models import ScreenshotRecord, TranscriptResult, TranscriptSegment, VideoInfo
+from vsl_study.models import ProcessSettings, ScreenshotRecord, TranscriptResult, TranscriptSegment, VideoInfo
+from vsl_study.pipeline import PipelineError, process_video
 
 
 def _info(path: str, duration: float = 700.0) -> VideoInfo:
@@ -136,4 +139,137 @@ def test_zip_without_requested_media_cannot_succeed(tmp_path: Path):
     atomic_write_text(job.root / "report.html", "<html></html>")
     with pytest.raises(RuntimeError, match="source recording was not copied"):
         write_zip(job, include_media=True, packaged_media=None)
+
+
+def _report_job(tmp_path: Path, html: str = "<html>v1</html>") -> JobDir:
+    job = JobDir(tmp_path / "job")
+    job.ensure()
+    atomic_write_text(job.root / "report.html", html)
+    (job.frames / "frame.jpg").write_bytes(b"jpeg")
+    return job
+
+
+def test_zip_successful_replacement(tmp_path: Path):
+    job = _report_job(tmp_path, "<html>v1</html>")
+    first = write_zip(job, include_media=False)
+    with zipfile.ZipFile(first) as zf:
+        assert zf.read("report.html") == b"<html>v1</html>"
+    atomic_write_text(job.root / "report.html", "<html>v2</html>")
+    second = write_zip(job, include_media=False)
+    assert second == first
+    assert second.name == "vsl_study_evidence.zip"
+    with zipfile.ZipFile(second) as zf:
+        assert zf.read("report.html") == b"<html>v2</html>"
+        names = zf.namelist()
+    assert "vsl_study_evidence.zip" not in names
+    assert "vsl_study_evidence.zip.part" not in names
+    assert not (job.root / "vsl_study_evidence.zip.part").exists()
+
+
+def test_zip_write_failure_preserves_existing_package(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
+    job = _report_job(tmp_path)
+    zpath = write_zip(job, include_media=False)
+    original = zpath.read_bytes()
+    digest = hashlib.sha256(original).hexdigest()
+    atomic_write_text(job.root / "report.html", "<html>changed</html>")
+
+    def boom(self, *args, **kwargs):
+        raise OSError("disk full")
+
+    monkeypatch.setattr(zipfile.ZipFile, "write", boom)
+    with pytest.raises(OSError, match="disk full"):
+        write_zip(job, include_media=False)
+    assert zpath.is_file()
+    assert zpath.read_bytes() == original
+    assert hashlib.sha256(zpath.read_bytes()).hexdigest() == digest
+    assert not (job.root / "vsl_study_evidence.zip.part").exists()
+
+
+def test_zip_validation_failure_preserves_existing_package(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
+    job = _report_job(tmp_path)
+    zpath = write_zip(job, include_media=False)
+    original = zpath.read_bytes()
+    atomic_write_text(job.root / "report.html", "<html>changed</html>")
+
+    def bad_testzip(self):
+        return "report.html"
+
+    monkeypatch.setattr(zipfile.ZipFile, "testzip", bad_testzip)
+    with pytest.raises(RuntimeError, match="integrity check"):
+        write_zip(job, include_media=False)
+    assert zpath.read_bytes() == original
+    assert not (job.root / "vsl_study_evidence.zip.part").exists()
+
+
+def test_zip_write_failure_without_previous_package(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
+    job = _report_job(tmp_path)
+    zpath = job.root / "vsl_study_evidence.zip"
+    assert not zpath.exists()
+
+    def boom(self, *args, **kwargs):
+        raise OSError("disk full")
+
+    monkeypatch.setattr(zipfile.ZipFile, "write", boom)
+    with pytest.raises(OSError, match="disk full"):
+        write_zip(job, include_media=False)
+    assert not zpath.exists()
+    assert not (job.root / "vsl_study_evidence.zip.part").exists()
+
+
+def test_zip_does_not_include_temporary_archive(tmp_path: Path):
+    job = _report_job(tmp_path)
+    leftover = job.root / "vsl_study_evidence.zip.part"
+    leftover.write_bytes(b"not-a-zip-should-not-be-archived")
+    zpath = write_zip(job, include_media=False)
+    with zipfile.ZipFile(zpath) as zf:
+        names = zf.namelist()
+        blob = b"".join(zf.read(name) for name in names)
+    assert "vsl_study_evidence.zip" not in names
+    assert "vsl_study_evidence.zip.part" not in names
+    assert not any(name.endswith(".part") for name in names)
+    assert b"not-a-zip-should-not-be-archived" not in blob
+    assert not leftover.exists()
+
+
+def test_zip_media_validation_failure_preserves_existing_package(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
+    from vsl_study.export import package_source_media
+
+    job = _report_job(tmp_path)
+    zpath = write_zip(job, include_media=False)
+    original = zpath.read_bytes()
+    source = tmp_path / "recording.fixed.mp4"
+    source.write_bytes(b"videobytes" * 1000)
+    packaged = package_source_media(job, source)
+    real_namelist = zipfile.ZipFile.namelist
+
+    def hidden_media(self):
+        return [name for name in real_namelist(self) if not str(name).replace("\\", "/").startswith("media/")]
+
+    monkeypatch.setattr(zipfile.ZipFile, "namelist", hidden_media)
+    with pytest.raises(RuntimeError, match="without the source recording"):
+        write_zip(job, include_media=True, packaged_media=packaged)
+    assert zpath.read_bytes() == original
+    assert not (job.root / "vsl_study_evidence.zip.part").exists()
+
+
+@requires_ffmpeg
+def test_failed_pipeline_rebuild_preserves_previous_zip(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
+    video = write_color_video(tmp_path / "src.mp4", duration=1.2, audio=True)
+    out = tmp_path / "job"
+    process_video(video, out, settings=ProcessSettings(interval=1.0, compact_view=False, ocr=False))
+    zpath = out / "vsl_study_evidence.zip"
+    original = zpath.read_bytes()
+    digest = hashlib.sha256(original).hexdigest()
+
+    def boom(*_args, **_kwargs):
+        raise OSError("disk full")
+
+    monkeypatch.setattr("vsl_study.pipeline.write_zip", boom)
+    with pytest.raises(PipelineError, match="incomplete"):
+        process_video(video, out, settings=ProcessSettings(interval=1.0, compact_view=False, ocr=False))
+    assert zpath.read_bytes() == original
+    assert hashlib.sha256(zpath.read_bytes()).hexdigest() == digest
+    job = json.loads((out / "job.json").read_text(encoding="utf-8"))
+    assert job["stages"]["export"]["status"] == "failed"
+    assert job["stages"]["export"]["status"] != "complete"
 

@@ -210,6 +210,73 @@ def test_include_media_disabled_omits_recording(tmp_path: Path):
 
 
 @requires_ffmpeg
+def test_malformed_capture_metadata_does_not_crash_or_claim_facts(tmp_path: Path):
+    rec_id = "badmeta01"
+    folder = tmp_path / rec_id
+    folder.mkdir()
+    video = write_color_video(folder / "recording.fixed.mp4", duration=1.2, audio=True)
+    raw = build_capture_record(
+        recording_id=rec_id,
+        recording_path=str(video),
+        complete=True,
+        audio_track=True,
+        audio_detected=True,
+        stop_reason="user_stop",
+        media_duration_s=1.2,
+    )
+    raw["complete"] = "false"
+    raw["audio_track"] = "false"
+    raw["audio_detected"] = "false"
+    raw["problems"] = 42
+    (folder / "capture.json").write_text(json.dumps(raw), encoding="utf-8")
+    out = tmp_path / "job"
+    process_video(
+        video,
+        out,
+        settings=ProcessSettings(model="tiny.en", interval=1.0, compact_view=False, ocr=False),
+    )
+    manifest = json.loads((out / "manifest.json").read_text(encoding="utf-8"))
+    job = json.loads((out / "job.json").read_text(encoding="utf-8"))
+    report = (out / "report.md").read_text(encoding="utf-8")
+    assert "capture" not in manifest
+    assert "capture" not in job
+    assert not (out / "capture-session" / "capture.json").exists()
+    assert any(isinstance(gap, dict) and gap.get("detail") == INVALID_NOTE for gap in manifest["gaps"])
+    assert "complete: True" not in report
+    with zipfile.ZipFile(out / "vsl_study_evidence.zip") as zf:
+        zipped = json.loads(zf.read("manifest.json"))
+        names = zf.namelist()
+    assert "capture" not in zipped
+    assert "capture-session/capture.json" not in names
+
+
+@requires_ffmpeg
+def test_rejected_capture_does_not_reappear_from_job_json(tmp_path: Path):
+    _folder, video = _write_capture_dir(tmp_path, "fallback1")
+    out = tmp_path / "job"
+    settings = ProcessSettings(model="tiny.en", interval=1.0, compact_view=False, ocr=False)
+    process_video(video, out, settings=settings)
+    assert json.loads((out / "job.json").read_text(encoding="utf-8"))["capture"]["complete"] is True
+    poisoned = json.loads((_folder / "capture.json").read_text(encoding="utf-8"))
+    poisoned["complete"] = "false"
+    poisoned["audio_track"] = "false"
+    poisoned["audio_detected"] = "false"
+    poisoned["problems"] = 42
+    (_folder / "capture.json").write_text(json.dumps(poisoned), encoding="utf-8")
+    process_video(video, out, settings=settings)
+    job = json.loads((out / "job.json").read_text(encoding="utf-8"))
+    manifest = json.loads((out / "manifest.json").read_text(encoding="utf-8"))
+    assert "capture" not in job
+    assert "capture" not in manifest
+    assert not (out / "capture-session" / "capture.json").exists()
+    with zipfile.ZipFile(out / "vsl_study_evidence.zip") as zf:
+        zipped = json.loads(zf.read("manifest.json"))
+        names = zf.namelist()
+    assert "capture" not in zipped
+    assert "capture-session/capture.json" not in names
+
+
+@requires_ffmpeg
 def test_media_copy_failure_is_not_complete_export(tmp_path: Path, monkeypatch):
     _folder, video = _write_capture_dir(tmp_path, "mediafail")
     out = tmp_path / "job"

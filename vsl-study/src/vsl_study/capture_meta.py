@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import math
 import os
 from datetime import datetime, timezone
 from pathlib import Path
@@ -208,6 +209,38 @@ def valid_recording_id(value: Any) -> bool:
     return bool(text) and text.isalnum() and len(text) <= 64
 
 
+def _optional_json_bool(raw: dict[str, Any], key: str) -> bool | None:
+    if key not in raw or raw[key] is None:
+        return None
+    value = raw[key]
+    if type(value) is bool:
+        return value
+    raise ValueError(f"{key} must be a JSON boolean")
+
+
+def _optional_duration(value: Any) -> float | None:
+    if value is None:
+        return None
+    if type(value) is bool or not isinstance(value, (int, float)):
+        raise ValueError("media_duration_s must be a finite nonnegative number")
+    duration = float(value)
+    if not math.isfinite(duration) or duration < 0:
+        raise ValueError("media_duration_s must be a finite nonnegative number")
+    return duration
+
+
+def _problems_list(value: Any) -> list[str]:
+    if value is None:
+        return []
+    if not isinstance(value, list):
+        raise ValueError("problems must be a list")
+    problems: list[str] = []
+    for item in value:
+        if isinstance(item, str) and item.strip():
+            problems.append(item.strip()[:500])
+    return problems
+
+
 def _same_path(left: Path, right: Path) -> bool:
     try:
         return left.resolve() == right.resolve()
@@ -234,16 +267,14 @@ def public_capture_record(raw: Any) -> dict[str, Any] | None:
         browser["userAgent"] = browser_in["userAgent"][:1000]
     if isinstance(browser_in.get("vendor"), str):
         browser["vendor"] = browser_in["vendor"][:200]
-    problems: list[str] = []
-    for item in raw.get("problems") or []:
-        if isinstance(item, str) and item.strip():
-            problems.append(item.strip()[:500])
-    duration = raw.get("media_duration_s")
-    if duration is not None:
-        try:
-            duration = float(duration)
-        except (TypeError, ValueError):
-            duration = None
+    try:
+        problems = _problems_list(raw.get("problems"))
+        duration = _optional_duration(raw.get("media_duration_s"))
+        audio_track = _optional_json_bool(raw, "audio_track")
+        audio_detected = _optional_json_bool(raw, "audio_detected")
+        complete = _optional_json_bool(raw, "complete")
+    except ValueError:
+        return None
     url = sanitize_source_url(str(raw.get("source_url_user_supplied") or raw.get("source_url") or ""))
     timeline = raw.get("timeline_note")
     if not isinstance(timeline, str) or not timeline.strip():
@@ -258,10 +289,10 @@ def public_capture_record(raw: Any) -> dict[str, Any] | None:
         "media_duration_s": duration,
         "browser": browser,
         "mime_type": str(raw.get("mime_type") or ""),
-        "audio_track": bool(raw.get("audio_track")),
-        "audio_detected": bool(raw.get("audio_detected")),
+        "audio_track": audio_track,
+        "audio_detected": audio_detected,
         "stop_reason": str(raw.get("stop_reason") or ""),
-        "complete": bool(raw.get("complete")),
+        "complete": complete,
         "problems": problems,
         "recording_path": str(raw.get("recording_path") or ""),
         "timeline_note": timeline.strip(),
@@ -354,4 +385,14 @@ def write_portable_capture(job_root: str | Path, capture: dict[str, Any]) -> Pat
     dest = folder / "capture.json"
     atomic_write_json(dest, cleaned)
     return dest
+
+
+def clear_portable_capture(job_root: str | Path) -> None:
+    dest = Path(job_root) / "capture-session" / "capture.json"
+    try:
+        dest.unlink()
+    except FileNotFoundError:
+        return
+    except OSError:
+        return
 

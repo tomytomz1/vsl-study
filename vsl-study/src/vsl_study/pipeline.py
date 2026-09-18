@@ -9,7 +9,11 @@ from typing import Any, Callable
 
 from vsl_study.align import CONTEXT_WINDOW_NOTE, match_screenshots
 from vsl_study.cache import JobConflictError, JobDir, identity_from_info
-from vsl_study.capture_meta import resolve_capture_for_source, write_portable_capture
+from vsl_study.capture_meta import (
+    clear_portable_capture,
+    resolve_capture_for_source,
+    write_portable_capture,
+)
 from vsl_study.export import (
     package_source_media,
     write_ai_prompt,
@@ -118,11 +122,19 @@ def process_video(
     info = inspect_video(src, progress=progress)
     identity = identity_from_info(info)
     try:
-        job.bind_source(identity, settings)
+        payload = job.bind_source(
+            identity,
+            settings,
+            capture_rejected=capture is None and bool(capture_notes),
+        )
     except JobConflictError:
         raise
+    capture = payload.get("capture")
+    settings = replace(settings, capture=capture)
     if capture:
         write_portable_capture(job.root, capture)
+    else:
+        clear_portable_capture(job.root)
 
     inspect_key = f"{info.fingerprint}|{INSPECT_CACHE_VERSION}"
     cached_inspect = job.read_complete_stage("inspect", inspect_key)
@@ -162,11 +174,8 @@ def process_video(
         processing_gaps.append({"type": "media_note", "detail": note})
     for note in capture_notes:
         processing_gaps.append({"type": "capture_metadata", "detail": note})
-    capture = settings.capture or (job.load_job() or {}).get("capture")
-    if capture:
-        write_portable_capture(job.root, capture)
-        settings = replace(settings, capture=capture)
-    if capture and not capture.get("complete"):
+    capture = settings.capture
+    if capture and capture.get("complete") is False:
         processing_gaps.append(
             {
                 "type": "capture_partial",
@@ -218,7 +227,6 @@ def process_video(
         "screenshots": [s.to_dict() for s in screenshots],
         "gaps": processing_gaps,
     }
-    capture = settings.capture or (job.load_job() or {}).get("capture")
     if capture:
         manifest["capture"] = capture
     packaged_media = None

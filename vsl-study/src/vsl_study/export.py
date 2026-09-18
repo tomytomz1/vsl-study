@@ -91,23 +91,34 @@ def package_source_media(job: JobDir, source: str | Path) -> dict[str, Any]:
     }
 
 
+def _capture_bool_label(value: Any) -> str:
+    if value is True:
+        return "True"
+    if value is False:
+        return "False"
+    return "unspecified"
+
+
 def _capture_markdown_lines(capture: dict[str, Any]) -> list[str]:
     url = capture.get("source_url_user_supplied") or ""
+    complete = capture.get("complete")
     lines = [
         "- Input: browser tab recording. Timestamps are relative to this recording, not the original video.",
         f"- Recording id: `{capture.get('recording_id')}`",
-        f"- Stop reason: {capture.get('stop_reason')} · complete: {capture.get('complete')}",
+        f"- Stop reason: {capture.get('stop_reason')} · complete: {_capture_bool_label(complete)}",
     ]
     if url:
         lines.append(f"- Address the user typed (not proof of the selected tab): `{url}`")
     if capture.get("title"):
         lines.append(f"- Title: {capture.get('title')}")
-    if capture.get("audio_track") or capture.get("audio_detected"):
+    audio_track = capture.get("audio_track")
+    audio_detected = capture.get("audio_detected")
+    if audio_track is not None or audio_detected is not None:
         lines.append(
             "- Audio: "
             + (
-                f"share-tab audio claimed={bool(capture.get('audio_track'))}, "
-                f"detected={bool(capture.get('audio_detected'))}"
+                f"share-tab audio claimed={_capture_bool_label(audio_track)}, "
+                f"detected={_capture_bool_label(audio_detected)}"
             )
         )
     if capture.get("started_at") or capture.get("ended_at"):
@@ -116,12 +127,15 @@ def _capture_markdown_lines(capture: dict[str, Any]) -> list[str]:
         )
     if capture.get("media_duration_s") is not None:
         lines.append(f"- Recorded media duration: {capture.get('media_duration_s')}s")
-    if not capture.get("complete"):
+    if complete is False:
         lines.append("- This recording may cover only part of the video.")
     if capture.get("timeline_note"):
         lines.append(f"- {capture.get('timeline_note')}")
-    for problem in capture.get("problems") or []:
-        lines.append(f"- Capture note: {problem}")
+    problems = capture.get("problems")
+    if isinstance(problems, list):
+        for problem in problems:
+            if isinstance(problem, str) and problem.strip():
+                lines.append(f"- Capture note: {problem}")
     return lines
 
 
@@ -300,12 +314,38 @@ def write_reports(
     )
 
 
+def _is_zip_output_path(path: Path, zip_path: Path, tmp_path: Path) -> bool:
+    if path.name in {zip_path.name, tmp_path.name}:
+        return True
+    try:
+        resolved = path.resolve()
+        return resolved == zip_path.resolve() or resolved == tmp_path.resolve()
+    except OSError:
+        return False
+
+
+def _validate_evidence_zip(tmp_path: Path, *, include_media: bool, packaged_rel: str) -> None:
+    with zipfile.ZipFile(tmp_path, "r") as zf:
+        bad = zf.testzip()
+        if bad is not None:
+            raise RuntimeError(f"The rebuilt evidence ZIP failed an integrity check at {bad}.")
+        names = zf.namelist()
+    nested = {tmp_path.name, "vsl_study_evidence.zip"}
+    if any(Path(name).name in nested for name in names):
+        raise RuntimeError("The rebuilt evidence ZIP includes a nested copy of the archive itself.")
+    if include_media and packaged_rel not in names:
+        raise RuntimeError(
+            "The evidence ZIP was written without the source recording. The package is incomplete."
+        )
+
+
 def write_zip(
     job: JobDir,
     include_media: bool,
     packaged_media: dict[str, Any] | None = None,
 ) -> Path:
     zip_path = job.root / "vsl_study_evidence.zip"
+    tmp_path = zip_path.with_name(zip_path.name + ".part")
     packaged_rel = ""
     if include_media:
         if not packaged_media or not packaged_media.get("relative_path"):
@@ -318,38 +358,39 @@ def write_zip(
             raise RuntimeError(
                 f"Include media was requested, but {packaged_rel} is missing from the job folder."
             )
-    skip_names = {zip_path.name}
-    with zipfile.ZipFile(zip_path, "w", compression=zipfile.ZIP_DEFLATED) as zf:
-        for path in job.root.rglob("*"):
-            if not path.is_file():
-                continue
-            rel = path.relative_to(job.root)
-            parts = rel.parts
-            posix = rel.as_posix()
-            if parts[0] == "work":
-                continue
-            if rel.name in skip_names:
-                continue
-            if posix == "cache/audio.wav" and not include_media:
-                continue
-            if parts[0] == PACKAGED_MEDIA_DIR and not include_media:
-                continue
-            suffix = path.suffix.lower()
-            if suffix in VIDEO_SUFFIXES and "frames" not in parts:
-                if not include_media or posix != packaged_rel:
+    try:
+        if tmp_path.exists():
+            tmp_path.unlink()
+        with zipfile.ZipFile(tmp_path, "w", compression=zipfile.ZIP_DEFLATED) as zf:
+            for path in job.root.rglob("*"):
+                if not path.is_file():
                     continue
-            compress = zipfile.ZIP_STORED if suffix in VIDEO_SUFFIXES else zipfile.ZIP_DEFLATED
-            zf.write(path, posix, compress_type=compress)
-    if include_media:
-        with zipfile.ZipFile(zip_path) as zf:
-            if packaged_rel not in zf.namelist():
-                try:
-                    zip_path.unlink()
-                except OSError:
-                    pass
-                raise RuntimeError(
-                    "The evidence ZIP was written without the source recording. The package is incomplete."
-                )
+                rel = path.relative_to(job.root)
+                parts = rel.parts
+                posix = rel.as_posix()
+                if parts[0] == "work":
+                    continue
+                if _is_zip_output_path(path, zip_path, tmp_path):
+                    continue
+                if posix == "cache/audio.wav" and not include_media:
+                    continue
+                if parts[0] == PACKAGED_MEDIA_DIR and not include_media:
+                    continue
+                suffix = path.suffix.lower()
+                if suffix in VIDEO_SUFFIXES and "frames" not in parts:
+                    if not include_media or posix != packaged_rel:
+                        continue
+                compress = zipfile.ZIP_STORED if suffix in VIDEO_SUFFIXES else zipfile.ZIP_DEFLATED
+                zf.write(path, posix, compress_type=compress)
+        _validate_evidence_zip(tmp_path, include_media=include_media, packaged_rel=packaged_rel)
+        os.replace(tmp_path, zip_path)
+    except Exception:
+        try:
+            if tmp_path.exists():
+                tmp_path.unlink()
+        except OSError:
+            pass
+        raise
     return zip_path
 
 

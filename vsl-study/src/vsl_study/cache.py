@@ -94,7 +94,13 @@ class JobDir:
             raise JobConflictError("job.json is not a JSON object")
         return data
 
-    def bind_source(self, identity: SourceIdentity, settings: ProcessSettings) -> dict[str, Any]:
+    def bind_source(
+        self,
+        identity: SourceIdentity,
+        settings: ProcessSettings,
+        *,
+        capture_rejected: bool = False,
+    ) -> dict[str, Any]:
         existing = self.load_job()
         if existing:
             prev = (existing.get("source") or {}).get("fingerprint")
@@ -128,10 +134,23 @@ class JobDir:
             "include_media": settings.include_media,
             "device": settings.device,
         }
-        if settings.capture:
-            payload["capture"] = settings.capture
+        from vsl_study.capture_meta import capture_associates_with_video, public_capture_record
+
+        incoming = public_capture_record(settings.capture) if settings.capture else None
+        rejected = capture_rejected or (settings.capture is not None and incoming is None)
+        if incoming:
+            payload["capture"] = incoming
+        elif rejected:
+            payload.pop("capture", None)
         elif existing and existing.get("capture"):
-            payload["capture"] = existing["capture"]
+            cleaned = public_capture_record(existing.get("capture"))
+            video_path = identity.resolved_path or identity.path
+            if cleaned and capture_associates_with_video(cleaned, video_path):
+                payload["capture"] = cleaned
+            else:
+                payload.pop("capture", None)
+        else:
+            payload.pop("capture", None)
         payload.setdefault("stages", {})
         atomic_write_json(self.job_file, payload)
         return payload

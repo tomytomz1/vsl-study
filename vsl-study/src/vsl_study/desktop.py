@@ -15,7 +15,7 @@ from tkinter import BooleanVar, StringVar, Tk, filedialog, messagebox, ttk
 from tkinter.scrolledtext import ScrolledText
 import tkinter as tk
 
-from vsl_study.capture_meta import apply_desktop_capture_event, resolve_capture_for_source
+from vsl_study.capture_meta import apply_desktop_capture_event, public_capture_record, resolve_capture_for_source
 from vsl_study.models import ProcessSettings
 from vsl_study.transcribe import SettingsError, validate_model_language
 
@@ -1244,6 +1244,7 @@ class VSLStudyApp:
         except SettingsError as exc:
             messagebox.showerror("VSL Study", str(exc), parent=self.root)
             return None
+        cleaned = public_capture_record(capture) if capture else None
         return ProcessSettings(
             model=model,
             language=language,
@@ -1253,13 +1254,14 @@ class VSLStudyApp:
             ocr=bool(self.ocr_var.get()),
             include_media=bool(self.media_var.get()),
             device="auto",
-            capture=dict(capture) if capture else None,
+            capture=dict(cleaned) if cleaned else None,
         )
 
     def _start_process(self, source: str, dest: str, settings: ProcessSettings) -> None:
         if self.running:
             return
-        settings = replace(settings, capture=dict(settings.capture) if settings.capture else None)
+        cleaned = public_capture_record(settings.capture) if settings.capture else None
+        settings = replace(settings, capture=dict(cleaned) if cleaned else None)
         dest_path = Path(dest)
         rec_id = (settings.capture or {}).get("recording_id") or ""
         if rec_id:
