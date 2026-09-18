@@ -1,0 +1,31 @@
+:root {
+  --bg: #f3f0ea;
+  --surface: #fffcf7;
+  --ink: #1a1714;
+  --muted: #6b6560;
+  --line: #d9d1c7;
+  --accent: #1e3a2f;
+  --on-accent: #f6f3ec;
+}
+* { box-sizing: border-box; }
+html, body { margin: 0; background: var(--bg); color: var(--ink); font: 16px/1.45 "Segoe UI", sans-serif; }
+main { max-width: 40rem; margin: 0 auto; padding: 2rem 1.25rem 3rem; }
+h1 { font-size: 1.75rem; margin: 0 0 0.5rem; }
+.lede, .hint, .instruct, .warn { color: var(--muted); }
+.warn { border-left: 3px solid var(--accent); padding-left: 0.75rem; }
+.steps { padding-left: 1.2rem; }
+.steps li { margin: 0.15rem 0; }
+label { display: block; margin: 1rem 0 0; font-size: 0.9rem; }
+input { width: 100%; margin-top: 0.35rem; padding: 0.7rem 0.8rem; border: 1px solid var(--line); border-radius: 2px; background: var(--surface); font: inherit; color: var(--ink); }
+.row { display: flex; gap: 0.75rem; flex-wrap: wrap; margin: 1.1rem 0; }
+button { font: 600 1rem/1.2 "Segoe UI", sans-serif; padding: 0.75rem 1rem; border: 1px solid var(--line); background: var(--surface); color: var(--ink); cursor: pointer; }
+button.primary, button#choose, button#start { background: var(--accent); color: var(--on-accent); border-color: var(--accent); }
+button:disabled { opacity: 0.45; cursor: not-allowed; }
+button.ghost { background: transparent; }
+.preview-wrap { background: #111; border-radius: 4px; overflow: hidden; margin: 1rem 0; }
+video { display: block; width: 100%; max-height: 240px; background: #000; }
+.meters { padding: 0.75rem 1rem 1rem; color: #eee; font-size: 0.9rem; }
+.bar { height: 8px; background: #333; margin: 0.4rem 0; }
+#level { display: block; height: 8px; width: 0; background: #8fcaa8; }
+#status { min-height: 3em; }
+#clock, #save-state { margin: 0.25rem 0; }

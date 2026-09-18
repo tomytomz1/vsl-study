@@ -28,7 +28,8 @@ def main() -> None:
     st.title("VSL Study")
     st.caption(
         "Local evidence extractor. Input is a video file you already have. "
-        "Nothing is uploaded to a cloud API."
+        "Nothing is uploaded to a cloud API. To record a browser tab, use the desktop app "
+        "(`python -m vsl_study app` or Launch VSL Study.cmd)."
     )
 
     with st.expander("Dependency check", expanded=False):

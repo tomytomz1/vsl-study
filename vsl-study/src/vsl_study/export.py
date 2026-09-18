@@ -26,6 +26,32 @@ from vsl_study.ocr import format_onscreen_text
 from vsl_study.timeutil import format_timecode, windows_5min
 
 
+def _capture_markdown_lines(capture: dict[str, Any]) -> list[str]:
+    url = capture.get("source_url_user_supplied") or ""
+    lines = [
+        "- Input: browser tab recording. Timestamps are relative to this recording, not the original video.",
+        f"- Recording id: `{capture.get('recording_id')}`",
+        f"- Stop reason: {capture.get('stop_reason')} · complete: {capture.get('complete')}",
+    ]
+    if url:
+        lines.append(f"- Address the user typed (not proof of the selected tab): `{url}`")
+    if capture.get("title"):
+        lines.append(f"- Title: {capture.get('title')}")
+    if capture.get("media_duration_s") is not None:
+        lines.append(f"- Recorded media duration: {capture.get('media_duration_s')}s")
+    if not capture.get("complete"):
+        lines.append("- This recording may cover only part of the video.")
+    if capture.get("timeline_note"):
+        lines.append(f"- {capture.get('timeline_note')}")
+    for problem in capture.get("problems") or []:
+        lines.append(f"- Capture note: {problem}")
+    return lines
+
+
+def _capture_html_items(capture: dict[str, Any]) -> str:
+    return "".join(f"<li>{html.escape(line.lstrip('- ').strip())}</li>" for line in _capture_markdown_lines(capture))
+
+
 def write_transcripts(job: JobDir, transcript: TranscriptResult) -> None:
     if transcript.status not in {"complete"}:
         note = transcript.error or "Transcription unavailable."
@@ -250,6 +276,9 @@ def _write_markdown(
         lines.append(f"- Transcription {transcript.status}: {transcript.error}")
     if transcript.device_note:
         lines.append(f"- Device: {transcript.device_note}")
+    capture = getattr(settings, "capture", None)
+    if capture:
+        lines.extend(_capture_markdown_lines(capture))
     lines.append("- Timestamp labels are in captions, not burned into screenshot pixels.")
     lines.append("")
     lines.append("## Gaps")
@@ -392,6 +421,9 @@ def _write_html(
         )
 
     notes = "".join(f"<li>{html.escape(n)}</li>" for n in info.notes)
+    capture = getattr(settings, "capture", None)
+    if capture:
+        notes += _capture_html_items(capture)
     gap_note = "".join(f"<li><pre>{html.escape(json.dumps(g))}</pre></li>" for g in gaps)
     versions_html = "".join(f"<li>{html.escape(k)}: {html.escape(v)}</li>" for k, v in versions.items())
     ocr_hits = [s for s in screenshots if s.ocr_status == "ok" and s.ocr_text]

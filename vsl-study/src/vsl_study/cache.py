@@ -128,6 +128,10 @@ class JobDir:
             "include_media": settings.include_media,
             "device": settings.device,
         }
+        if settings.capture:
+            payload["capture"] = settings.capture
+        elif existing and existing.get("capture"):
+            payload["capture"] = existing["capture"]
         payload.setdefault("stages", {})
         atomic_write_json(self.job_file, payload)
         return payload

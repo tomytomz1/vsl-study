@@ -40,6 +40,7 @@ class ProcessSettings:
     compact_view: bool = True
     include_media: bool = False
     device: str = "auto"  # auto | cpu | cuda
+    capture: dict[str, Any] | None = None
 
     def transcribe_key(self, fingerprint: str) -> str:
         return f"{fingerprint}|{self.model}|{self.language}|{self.task}"

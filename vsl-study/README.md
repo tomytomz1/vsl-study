@@ -44,7 +44,13 @@ ffprobe -version
 
 ### On-screen OCR
 
-VSLs put prices, headlines, and CTAs on the video. OCR is **on by default**. It reads each screenshot with RapidOCR (bundled models) and falls back to Tesseract when that binary is installed. Results go in `onscreen.txt` and `ocr.json`, and are copied into each `evidence_5min/` folder. They stay separate from the Whisper transcript.
+VSLs put prices, headlines, and CTAs on the video. RapidOCR (bundled models) can read each screenshot, with optional Tesseract fallback. Results go in `onscreen.txt` and `ocr.json`, and are copied into each `evidence_5min/` folder. They stay separate from the Whisper transcript.
+
+**Defaults differ by entry point:**
+
+- **Desktop app:** Copy on-screen text starts **unchecked** for a new preference profile. After you change it, that choice is remembered.
+- **CLI:** OCR is **on** unless you pass `--no-ocr`.
+- **Streamlit UI:** the checkbox starts on.
 
 Tesseract is optional. If you already have it, the app finds `tesseract.exe` even when it is not on PATH (typical Windows install: `C:\Program Files\Tesseract-OCR\`).
 
@@ -52,7 +58,7 @@ Tesseract is optional. If you already have it, the app finds `tesseract.exe` eve
 - macOS: `brew install tesseract`
 - Debian/Ubuntu: `sudo apt install tesseract-ocr`
 
-Use `--no-ocr` (CLI) or uncheck the OCR box (app) to skip.
+Use `--no-ocr` (CLI) to skip. In the desktop app, leave **Copy on-screen text** unchecked to skip.
 
 ## Setup
 
@@ -86,15 +92,33 @@ The first Whisper run **downloads model weights** into the library cache (often 
 
 ## Use it like a normal Windows app
 
-You do not need Cursor, a terminal, or a browser.
+Local-file processing stays in the desktop window. Recording a browser tab opens one companion page in Chrome or Edge; transcription still runs in the desktop app. You do not need Cursor or a Streamlit server.
 
-1. Double-click **VSL Study** on your Desktop or in the Start menu (or `Launch VSL Study.cmd` in this folder).
-2. Click **Browse…** next to **Video** and pick the MP4/MOV/MKV/WebM file in the normal Windows file window.
-3. Click **Browse…** next to **Save to** and pick (or create) the folder for the evidence package. If you only pick a video, a folder named `<video>-vsl-study` is suggested beside it.
-4. Click **Run**. Watch the log. When it finishes, use **Open save folder** or **Open report**.
-5. Close the window to quit.
+1. Double-click **Launch VSL Study.cmd** (or `python -m vsl_study app`).
+2. Choose a **save folder**.
+3. Either **Choose file** for a video you already have, or **Record a browser tab**.
+4. Click **Create study folder** (file input) or **Stop and process** in the recorder (tab capture).
+5. When it finishes, use **Open save folder** or **Open report**.
 
-The same pipeline still works from the command line if you prefer. `python -m vsl_study ui` is an optional browser UI and is not required.
+### Record a browser tab
+
+Tested target: **current Chrome or Edge on Windows**. Tab audio depends on the browser picker; this app cannot silently select a tab from a URL. A microphone is not used.
+
+Recordings are saved under `%LOCALAPPDATA%\VSL Study\captures\` (unique folder per recording). The study folder you picked receives the transcript and screenshots. If that folder already belongs to another video, a new sibling folder is used.
+
+If the recorder tab crashes, the browser loses the unsaved buffer. Chunks already acknowledged on disk are kept. Incomplete recordings are **not** treated as a full VSL and are not analyzed automatically.
+
+Capture takes **real playback time**. Keep the computer awake. The app cannot press play or detect when a cross-origin video ends. A minutes field, if you fill it, is only a time limit.
+
+After you click **Record a browser tab**:
+
+1. **Open page** — optional address; or open the VSL yourself.
+2. **Select tab with audio** — choose that browser tab and turn on sharing its sound.
+3. **Start and play** — start recording, then play the video from the beginning if you can. Lead-in is part of the recording timeline.
+4. **Stop and process** — wait until saving finishes; the desktop window then transcribes and takes screenshots.
+5. **Open evidence** — **Open save folder** / **Open report** in VSL Study.
+
+Timestamps in the report are relative to **this recording**, not verified times in the original video.
 
 ## Commands
 
@@ -159,7 +183,7 @@ On-screen text is stored separately from the spoken transcript (`onscreen.txt`, 
 | Empty transcript on a talking video | Confirm the file has an audio stream (`doctor` after a failed job: see `manifest.json`) |
 | Video with no audio | Visual outputs still write; transcription is marked unavailable (not a fake empty success) |
 | CUDA requested but CPU used | No supported GPU; the UI/CLI will say so |
-| OCR never runs / empty `onscreen.txt` | Leave OCR checked; RapidOCR is the default. Tesseract is optional. Use `--no-ocr` only to skip |
+| OCR never runs / empty `onscreen.txt` | Desktop: check **Copy on-screen text**. CLI: OCR is on by default. RapidOCR is the default engine. Use `--no-ocr` only to skip |
 | Streamlit rerun starts nothing | Use Run once; a session lock blocks overlapping jobs |
 | Another AI “didn’t see” images | Attach `frames/*.jpg` plus transcript; don’t rely on ZIP/Markdown paths |
 

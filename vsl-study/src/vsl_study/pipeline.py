@@ -152,6 +152,15 @@ def process_video(
         )
     for note in info.notes:
         processing_gaps.append({"type": "media_note", "detail": note})
+    capture = settings.capture or (job.load_job() or {}).get("capture")
+    if capture and not capture.get("complete"):
+        processing_gaps.append(
+            {
+                "type": "capture_partial",
+                "detail": capture.get("timeline_note"),
+                "stop_reason": capture.get("stop_reason"),
+            }
+        )
 
     manifest = {
         "schema": 1,
@@ -193,6 +202,9 @@ def process_video(
         "screenshots": [s.to_dict() for s in screenshots],
         "gaps": processing_gaps,
     }
+    capture = settings.capture or (job.load_job() or {}).get("capture")
+    if capture:
+        manifest["capture"] = capture
     from vsl_study.cache import atomic_write_json
 
     atomic_write_json(job.root / "manifest.json", manifest)
@@ -248,6 +260,7 @@ def add_frames_at(job_dir: str | Path, timestamps: list[float], progress: Progre
         compact_view=bool(raw_settings.get("compact_view", True)),
         include_media=bool(raw_settings.get("include_media", False)),
         device=raw_settings.get("device", "auto"),
+        capture=meta.get("capture"),
     )
     existing_extra = list((meta.get("extra_times") or []))
     merged = sorted(set(float(t) for t in existing_extra + list(timestamps)))

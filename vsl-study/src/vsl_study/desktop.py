@@ -8,7 +8,8 @@ import queue
 import shutil
 import threading
 import traceback
-from dataclasses import dataclass
+import webbrowser
+from dataclasses import dataclass, replace
 from pathlib import Path
 from tkinter import BooleanVar, StringVar, Tk, filedialog, messagebox, ttk
 from tkinter.scrolledtext import ScrolledText
@@ -80,6 +81,9 @@ STAGE_TITLES = {
     "export": "Saving your folder",
     "done": "Finished",
     "error": "Something went wrong",
+    "recording": "Recording",
+    "saving": "Saving",
+    "validate": "Validating",
 }
 MESSAGE_REWRITES = (
     ("Ready.", "Choose a video and a folder, then create a study folder."),
@@ -142,12 +146,53 @@ def _quality_from_prefs(prefs: dict) -> str:
 
 
 def _whisper_model(quality: str, language: str, task: str = "transcribe") -> str:
-    english = language in {"en", "auto"} and task != "translate"
+    """Map UI quality to a Whisper model.
+
+    Explicit English uses .en models. Automatic detection and other languages
+    use multilingual models so Whisper can identify the spoken language.
+    Translation always needs a multilingual model.
+    """
+    use_english_only = language == "en" and task != "translate"
     if quality == "faster":
-        return "base.en" if english else "base"
+        return "base.en" if use_english_only else "base"
     if quality == "accurate":
-        return "medium.en" if english else "medium"
-    return "small.en" if english else "small"
+        return "medium.en" if use_english_only else "medium"
+    return "small.en" if use_english_only else "small"
+
+
+def format_job_completion(result: dict) -> tuple[str, str]:
+    """Status line and log line after process_video. Visual outputs may exist without speech."""
+    job = str(result.get("job") or "")
+    status = str(result.get("transcript_status") or "complete")
+    if status == "complete":
+        return "Finished. Your folder is ready.", f"Wrote evidence package to {job}"
+    if status == "failed":
+        return (
+            "Study folder saved, but the spoken words could not be written down.",
+            f"Visual outputs are in {job}. Speech recognition failed.",
+        )
+    if status == "skipped":
+        return (
+            "Study folder saved. There was no speech track to write down.",
+            f"Visual outputs are in {job}. Transcription was skipped.",
+        )
+    return (
+        "Study folder saved, with a partial transcript.",
+        f"Wrote evidence package to {job} (transcript: {status}).",
+    )
+
+
+def unique_job_dir(dest: Path, suffix: str) -> Path:
+    dest = dest.expanduser()
+    if not (dest / "job.json").exists():
+        return dest
+    parent = dest.parent
+    candidate = parent / f"{dest.name}-{suffix}"
+    n = 2
+    while (candidate / "job.json").exists():
+        candidate = parent / f"{dest.name}-{suffix}-{n}"
+        n += 1
+    return candidate
 
 
 def _language_label(raw: str) -> str:
@@ -551,7 +596,10 @@ class VSLStudyApp:
         self.ocr_var = BooleanVar(value=bool(prefs["ocr_on"]) if "ocr_on" in prefs else False)
         self.status_var = StringVar(value="Choose a video and a folder.")
         self.running = False
-        self.messages: queue.Queue[tuple[str, str]] = queue.Queue()
+        self.capturing = False
+        self._capture_server = None
+        self._processed_captures: set[str] = set()
+        self.messages: queue.Queue[tuple[str, object]] = queue.Queue()
         self.last_job: str | None = None
         self._log_placeholder = True
         self._options: tk.Toplevel | None = None
@@ -661,6 +709,20 @@ class VSLStudyApp:
         inner = tk.Frame(card, bg=SURFACE, padx=self.layout.px(22), pady=self.layout.px(20))
         inner.pack(fill="x")
         self._file_field(inner, "Video", self.input_var, "Choose file", self._browse_input).pack(fill="x")
+        record_row = tk.Frame(inner, bg=SURFACE)
+        record_row.pack(fill="x", pady=(self.layout.px(12), 0))
+        self.record_btn = self._outline_button(record_row, "Record a browser tab", self._record_tab)
+        self.record_btn.pack(side="left")
+        tk.Label(
+            record_row,
+            text="Opens Chrome or Edge. Keep this window open. Capture takes real playback time.",
+            bg=SURFACE,
+            fg=MUTED,
+            font=("Segoe UI", 9),
+            anchor="w",
+            justify="left",
+            wraplength=self.layout.px(320),
+        ).pack(side="left", padx=(self.layout.px(12), 0))
         tk.Frame(inner, bg=LINE, height=1).pack(fill="x", pady=self.layout.px(16))
         self._file_field(inner, "Save folder", self.output_var, "Choose folder", self._browse_output).pack(fill="x")
 
@@ -847,8 +909,12 @@ class VSLStudyApp:
         self.running = running
         if running:
             self.run_btn.configure(state="disabled", text="Working…", bg=ACCENT_OFF, cursor="arrow")
+            if hasattr(self, "record_btn"):
+                self.record_btn.configure(state="disabled")
         else:
             self.run_btn.configure(state="normal", text="Create study folder", bg=ACCENT, cursor="hand2")
+            if hasattr(self, "record_btn") and not self.capturing:
+                self.record_btn.configure(state="normal")
 
     def _set_log_placeholder(self, text: str) -> None:
         self._log_placeholder = True
@@ -1062,11 +1128,24 @@ class VSLStudyApp:
                 self._append_log(stage, message)
             elif kind == "done":
                 self._set_running(False)
-                self.last_job = payload
-                self.status_var.set("Finished. Your folder is ready.")
-                self._append_log("done", f"Wrote evidence package to {payload}")
+                data = json.loads(payload) if isinstance(payload, str) and payload.startswith("{") else {"job": payload, "transcript_status": "complete"}
+                self.last_job = str(data.get("job") or "")
+                status_line, log_line = format_job_completion(data)
+                self.status_var.set(status_line)
+                self._append_log("done", log_line)
+            elif kind == "capture_ready":
+                self._on_capture_ready(json.loads(payload) if isinstance(payload, str) else payload)
+            elif kind == "capture_incomplete":
+                self.capturing = False
+                if hasattr(self, "record_btn") and not self.running:
+                    self.record_btn.configure(state="normal")
+                data = json.loads(payload) if isinstance(payload, str) else payload
+                message = data.get("message") or "Recording stopped without a complete capture. Partial media was kept and not analyzed as the full video."
+                self.status_var.set(message)
+                self._append_log("recording", message)
             elif kind == "error":
                 self._set_running(False)
+                self.capturing = False
                 self.status_var.set("Something went wrong.")
                 self._append_log("error", payload)
                 messagebox.showerror("VSL Study", payload, parent=self.root)
@@ -1074,6 +1153,13 @@ class VSLStudyApp:
 
     def _run(self) -> None:
         if self.running:
+            return
+        if self.capturing:
+            messagebox.showwarning(
+                "VSL Study",
+                "Finish the browser recording first, or close the recorder tab.",
+                parent=self.root,
+            )
             return
         source = self.input_var.get().strip().strip('"')
         dest = self.output_var.get().strip().strip('"')
@@ -1086,22 +1172,9 @@ class VSLStudyApp:
         if not dest:
             messagebox.showwarning("VSL Study", "Choose a folder to save the results.", parent=self.root)
             return
-        try:
-            model, language, task = self._speech_settings()
-            validate_model_language(model, language, task)
-        except SettingsError as exc:
-            messagebox.showerror("VSL Study", str(exc), parent=self.root)
+        settings = self._snapshot_settings()
+        if settings is None:
             return
-
-        settings = ProcessSettings(
-            model=model,
-            language=language,
-            task=task,
-            detector="adaptive",
-            interval=5.0,
-            ocr=bool(self.ocr_var.get()),
-            device="auto",
-        )
         _save_prefs(
             {
                 "input": source,
@@ -1112,6 +1185,35 @@ class VSLStudyApp:
                 "ocr_on": settings.ocr,
             }
         )
+        self._start_process(source, dest, settings)
+
+    def _snapshot_settings(self, capture: dict | None = None) -> ProcessSettings | None:
+        try:
+            model, language, task = self._speech_settings()
+            validate_model_language(model, language, task)
+        except SettingsError as exc:
+            messagebox.showerror("VSL Study", str(exc), parent=self.root)
+            return None
+        return ProcessSettings(
+            model=model,
+            language=language,
+            task=task,
+            detector="adaptive",
+            interval=5.0,
+            ocr=bool(self.ocr_var.get()),
+            device="auto",
+            capture=dict(capture) if capture else None,
+        )
+
+    def _start_process(self, source: str, dest: str, settings: ProcessSettings) -> None:
+        if self.running:
+            return
+        settings = replace(settings, capture=dict(settings.capture) if settings.capture else None)
+        dest_path = Path(dest)
+        rec_id = (settings.capture or {}).get("recording_id") or ""
+        if rec_id:
+            dest_path = unique_job_dir(dest_path, rec_id[:8])
+            dest = str(dest_path)
         self._set_running(True)
         self.status_var.set("Starting…")
         self._append_log("run", f"Working on {source}\nSaving to {dest}")
@@ -1122,14 +1224,88 @@ class VSLStudyApp:
 
             try:
                 progress("run", "Loading transcription libraries")
+                from vsl_study.cache import JobConflictError
                 from vsl_study.pipeline import process_video
 
-                result = process_video(source, dest, settings=settings, progress=progress)
-                self.messages.put(("done", result["job"]))
+                out = dest
+                try:
+                    result = process_video(source, out, settings=settings, progress=progress)
+                except JobConflictError:
+                    alt = unique_job_dir(Path(out), "rec")
+                    progress("export", f"That folder already belongs to another video. Saving to {alt}")
+                    result = process_video(source, alt, settings=settings, progress=progress)
+                self.messages.put(("done", json.dumps({"job": result["job"], "transcript_status": result.get("transcript_status", "complete")})))
             except Exception as exc:  # noqa: BLE001
                 self.messages.put(("error", str(exc) or traceback.format_exc()))
 
         threading.Thread(target=worker, daemon=True, name="vsl-study-job").start()
+
+    def _captures_root(self) -> Path:
+        base = Path(os.environ.get("LOCALAPPDATA") or Path.home() / "AppData" / "Local")
+        path = base / "VSL Study" / "captures"
+        path.mkdir(parents=True, exist_ok=True)
+        return path
+
+    def _ensure_capture_server(self):
+        if self._capture_server is not None and self._capture_server.alive():
+            return self._capture_server
+        from vsl_study.capture_server import CaptureServer
+
+        def on_event(kind: str, payload: dict) -> None:
+            self.messages.put((kind, json.dumps(payload)))
+
+        self._capture_server = CaptureServer(self._captures_root(), on_event=on_event)
+        self._capture_server.start()
+        return self._capture_server
+
+    def _record_tab(self) -> None:
+        if self.running:
+            messagebox.showinfo("VSL Study", "Wait until the current job finishes.", parent=self.root)
+            return
+        dest = self.output_var.get().strip().strip('"')
+        if not dest:
+            messagebox.showwarning("VSL Study", "Choose a folder to save the results first.", parent=self.root)
+            return
+        try:
+            server = self._ensure_capture_server()
+        except Exception as exc:  # noqa: BLE001
+            messagebox.showerror("VSL Study", f"Could not start the local recorder.\n{exc}", parent=self.root)
+            return
+        self.capturing = True
+        if hasattr(self, "record_btn"):
+            self.record_btn.configure(state="disabled")
+        self.status_var.set("Recording page opened. Choose the tab with audio, then start.")
+        self._append_log(
+            "recording",
+            "Opened the local recorder. After you stop, this window transcribes and takes screenshots. "
+            "Keep the computer awake. This app cannot detect when the video ends.",
+        )
+        webbrowser.open(server.recorder_url)
+
+    def _on_capture_ready(self, data: dict) -> None:
+        rec_id = str(data.get("id") or "")
+        if rec_id and rec_id in self._processed_captures:
+            return
+        if rec_id:
+            self._processed_captures.add(rec_id)
+        if data.get("duplicate") and self.running:
+            return
+        path = str(data.get("path") or "")
+        capture = data.get("capture") if isinstance(data.get("capture"), dict) else None
+        dest = self.output_var.get().strip().strip('"')
+        if not path or not dest:
+            self.status_var.set("Recording saved, but the save folder is missing.")
+            self._append_log("error", "Recording finished without a save folder.")
+            self.capturing = False
+            return
+        settings = self._snapshot_settings(capture)
+        if settings is None:
+            self.capturing = False
+            return
+        self.capturing = False
+        self.input_var.set(path)
+        self._append_log("validate", "Recording saved. Starting the study folder.")
+        self._start_process(path, dest, settings)
 
     def _open_output(self) -> None:
         path = self.last_job or self.output_var.get().strip()
@@ -1147,13 +1323,19 @@ class VSLStudyApp:
         os.startfile(report)  # noqa: S606
 
     def _on_close(self) -> None:
-        if self.running:
+        if self.running or self.capturing:
             if not messagebox.askyesno(
                 "VSL Study",
-                "A job is still running. Close anyway?",
+                "A recording or job is still running. Close anyway? Partial media already saved on disk is kept. Capture in the browser will stop.",
                 parent=self.root,
             ):
                 return
+        if self._capture_server is not None:
+            try:
+                self._capture_server.stop()
+            except Exception:
+                pass
+            self._capture_server = None
         self.root.destroy()
 
 

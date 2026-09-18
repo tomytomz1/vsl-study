@@ -1,0 +1,60 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Record a browser tab — VSL Study</title>
+  <link rel="stylesheet" href="/recorder.css">
+</head>
+<body>
+  <main>
+    <h1>Record a browser tab</h1>
+    <p class="lede">This page stays on your computer. Capture takes real playback time. Keep this computer awake, and keep VSL Study open.</p>
+    <p class="warn">This app cannot press play or notice when a video on another site ends. You stop it. A time limit, if you set one, is only a clock — not detected completion.</p>
+
+    <ol class="steps">
+      <li>Open the page</li>
+      <li>Select the tab with audio</li>
+      <li>Start and play</li>
+      <li>Stop and process</li>
+      <li>Open the evidence in VSL Study</li>
+    </ol>
+
+    <label>Page address (optional)
+      <input id="url" type="url" placeholder="https://">
+    </label>
+    <label>Recording title (optional)
+      <input id="title" type="text" maxlength="200" placeholder="Short name for this recording">
+    </label>
+    <label>Stop after this many minutes (optional time limit)
+      <input id="limit" type="number" min="1" max="180" step="1" placeholder="Leave blank">
+    </label>
+    <p class="hint">The address is a note you typed, not proof that the selected tab was that page. Do not put passwords in it.</p>
+
+    <div class="row">
+      <button type="button" id="open-page" class="ghost">Open page</button>
+      <button type="button" id="choose">Choose tab and audio</button>
+    </div>
+
+    <p class="instruct">Prepare the player at the beginning and make the video large enough to read. In the browser picker, choose that <strong>tab</strong> and turn on sharing the tab’s sound. Do not share the whole screen if you can choose a tab. You can play a moment to confirm sound, then go back to the start if the player allows it.</p>
+
+    <div class="preview-wrap">
+      <video id="preview" muted playsinline></video>
+      <div class="meters">
+        <div><span id="track-state">No audio track yet</span></div>
+        <div class="bar"><span id="level"></span></div>
+        <div><span id="signal-state">No audible signal detected</span></div>
+      </div>
+    </div>
+
+    <div class="row">
+      <button type="button" id="start" disabled>Start recording</button>
+      <button type="button" id="stop" class="primary" disabled>Stop and process</button>
+    </div>
+    <p id="clock">Not recording</p>
+    <p id="save-state">Nothing saved yet.</p>
+    <p id="status" role="status"></p>
+  </main>
+  <script src="/recorder.js"></script>
+</body>
+</html>

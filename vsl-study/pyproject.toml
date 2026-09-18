@@ -30,7 +30,7 @@ vsl-study = "vsl_study.cli:main"
 where = ["src"]
 
 [tool.setuptools.package-data]
-vsl_study = ["ai_study_prompt.md"]
+vsl_study = ["ai_study_prompt.md", "recorder/*"]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]
