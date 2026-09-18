@@ -421,13 +421,14 @@ def _stage_frames(
             progress=frames_progress,
         )
     except Exception as exc:  # noqa: BLE001
+        done = sum(1 for path in job.frames.glob("frame_*.jpg") if path.is_file())
         job.write_stage(
             "frames",
             key,
             "failed",
             {
                 "scheduled": len(candidates),
-                "completed": 0,
+                "completed": done,
                 "error": str(exc),
                 "traceback": traceback.format_exc(),
             },

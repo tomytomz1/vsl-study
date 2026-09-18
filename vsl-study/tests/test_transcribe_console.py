@@ -113,25 +113,42 @@ def test_transcribe_wav_with_missing_console_streams(tmp_path: Path, monkeypatch
     not Path(sys.executable).with_name("pythonw.exe").exists(),
     reason="pythonw.exe is not next to this interpreter",
 )
-def test_pythonw_tqdm_wrapper_is_distinct_from_mocked_tests(tmp_path: Path):
-    """Launch pythonw so stdout really is absent. This is not the mocked sys.stdout=None test."""
+def test_pythonw_natural_missing_streams(tmp_path: Path):
+    """Real pythonw.exe with inherited stdio, not capture_output and not child-forced None."""
+    import json
     import subprocess
     import textwrap
 
+    result_path = tmp_path / "pythonw_result.json"
     script = tmp_path / "pythonw_tqdm.py"
-    out = tmp_path / "ok.txt"
     script.write_text(
         textwrap.dedent(
             f"""
+            import json
+            import traceback
             import sys
             from pathlib import Path
-            sys.path.insert(0, {str(Path(__file__).resolve().parents[1] / "src")!r})
-            from vsl_study.whisper_io import safe_tqdm
-            import tqdm
-            with safe_tqdm(None, "transcribe") as sink:
-                with tqdm.tqdm(total=3, unit="frames", disable=False) as bar:
-                    bar.update(3)
-            Path({str(out)!r}).write_text(str(sink.writes), encoding="utf-8")
+
+            payload = {{
+                "stdout_is_none": sys.stdout is None,
+                "stderr_is_none": sys.stderr is None,
+                "stdout_type": type(sys.stdout).__name__,
+                "stderr_type": type(sys.stderr).__name__,
+            }}
+            try:
+                sys.path.insert(0, {str(Path(__file__).resolve().parents[1] / "src")!r})
+                from vsl_study.whisper_io import safe_tqdm
+                import tqdm
+                with safe_tqdm(None, "transcribe") as sink:
+                    with tqdm.tqdm(total=3, unit="frames", disable=False) as bar:
+                        bar.update(3)
+                    sink.flush()
+                payload["writes"] = sink.writes
+                payload["ok"] = True
+            except Exception:
+                payload["ok"] = False
+                payload["error"] = traceback.format_exc()
+            Path({str(result_path)!r}).write_text(json.dumps(payload), encoding="utf-8")
             """
         ),
         encoding="utf-8",
@@ -139,11 +156,20 @@ def test_pythonw_tqdm_wrapper_is_distinct_from_mocked_tests(tmp_path: Path):
     pythonw = Path(sys.executable).with_name("pythonw.exe")
     completed = subprocess.run(
         [str(pythonw), str(script)],
-        capture_output=True,
-        text=True,
         timeout=30,
         check=False,
+        close_fds=True,
     )
-    assert completed.returncode == 0, completed.stderr
-    assert out.exists()
-    assert int(out.read_text(encoding="utf-8")) >= 1
+    if not result_path.exists():
+        pytest.fail(
+            f"pythonw child did not write {result_path} (exit {completed.returncode})"
+        )
+    payload = json.loads(result_path.read_text(encoding="utf-8"))
+    if not payload.get("stdout_is_none") or not payload.get("stderr_is_none"):
+        pytest.skip(
+            "pythonw did not have naturally absent stdout/stderr in this environment "
+            f"(stdout={payload.get('stdout_type')}, stderr={payload.get('stderr_type')})"
+        )
+    assert completed.returncode == 0
+    assert payload.get("ok") is True, payload.get("error")
+    assert int(payload.get("writes") or 0) >= 1

@@ -2,12 +2,15 @@
 
 from __future__ import annotations
 
+import os
 import queue
 import re
+import subprocess
+import tempfile
 import threading
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Callable, Iterable, Iterator
+from typing import Callable, Iterable, Iterator, Sequence
 
 from PIL import Image, ImageDraw, ImageFont
 
@@ -19,6 +22,13 @@ ProgressCb = Callable[[str, str], None]
 SHOWINFO_PTS = re.compile(r"pts_time:(?P<t>-?\d+(?:\.\d+)?)")
 JPEG_SOI = b"\xff\xd8"
 JPEG_EOI = b"\xff\xd9"
+IO_TIMEOUT_S = 120.0
+STDERR_TAIL_CHARS = 8000
+WIN32_CMDLINE_LIMIT = 32767
+# Recorder UI (`recorder/index.html`) allows at most 180 minutes.
+RECORDER_MAX_DURATION_S = 180 * 60
+_JPEG_END = object()
+_PTS_END = object()
 
 
 @dataclass
@@ -196,10 +206,32 @@ def _try_select_capture(
     return _try_bounded_capture(info, seek_at, dest, max_width)
 
 
+class DecodeError(RuntimeError):
+    """ffmpeg exited unsuccessfully or produced unusable frame data."""
+
+    def __init__(self, message: str, *, returncode: int | None = None, stderr_tail: str = ""):
+        self.returncode = returncode
+        self.stderr_tail = stderr_tail or ""
+        parts = [message]
+        if returncode not in (None, 0):
+            parts.append(f"ffmpeg exit {returncode}")
+        tail = self.stderr_tail.strip()
+        if tail:
+            parts.append(tail[-1500:])
+        super().__init__("\n".join(parts))
+
+
 class _JpegPipe:
     def __init__(self, stream):
         self.stream = stream
         self.buf = b""
+
+    @property
+    def incomplete(self) -> bool:
+        start = self.buf.find(JPEG_SOI)
+        if start < 0:
+            return False
+        return self.buf.find(JPEG_EOI, start + 2) < 0
 
     def read_one(self) -> bytes | None:
         while True:
@@ -225,6 +257,225 @@ def _select_expr(timestamps: list[float]) -> str:
     return "+".join(parts)
 
 
+def _filter_graph(info: VideoInfo, max_width: int, timestamps: list[float] | None) -> str:
+    vf_parts: list[str] = []
+    if timestamps:
+        vf_parts.append(f"select={_select_expr(timestamps)}")
+    vf_parts.append("showinfo")
+    scale = _scale_filter(info, max_width)
+    if scale:
+        vf_parts.append(scale)
+    return ",".join(vf_parts)
+
+
+def write_filter_script(graph: str, directory: str | Path | None = None) -> Path:
+    fd, name = tempfile.mkstemp(prefix="vsl-study-vf-", suffix=".txt", dir=directory, text=True)
+    path = Path(name)
+    with os.fdopen(fd, "w", encoding="utf-8", newline="\n") as handle:
+        handle.write(graph)
+    return path
+
+
+def serialized_command_length(args: Sequence[str]) -> int:
+    """Length of the command as Windows CreateProcess would see it."""
+    if hasattr(subprocess, "list2cmdline"):
+        return len(subprocess.list2cmdline(list(args)))
+    return sum(len(str(part)) + 3 for part in args)
+
+
+def build_decode_command(
+    info: VideoInfo,
+    max_width: int,
+    timestamps: list[float] | None = None,
+    start_s: float | None = None,
+    filter_script: str | Path | None = None,
+) -> list[str]:
+    """Argument vector for one sequential decode. Filter graphs go in a file."""
+    graph = _filter_graph(info, max_width, timestamps)
+    args = [
+        "ffmpeg",
+        "-hide_banner",
+        "-nostdin",
+    ]
+    if start_s is not None and start_s > 0:
+        args.extend(["-ss", f"{start_s:.3f}", "-copyts"])
+    args.extend(["-i", info.resolved_path, "-an", "-vsync", "0"])
+    if filter_script is None:
+        args.extend(["-vf", graph])
+    else:
+        args.extend(["-filter_script:v", os.fspath(filter_script)])
+    if timestamps:
+        args.extend(["-frames:v", str(len(timestamps))])
+    args.extend(["-f", "image2pipe", "-vcodec", "mjpeg", "-q:v", "2", "pipe:1"])
+    return args
+
+
+class FrameDecoder:
+    """One ffmpeg process. Distinguishes EOF, intentional stop, and decoder failure."""
+
+    def __init__(self, args: Sequence[str]):
+        self.args = list(args)
+        self._proc = ffcmd.popen(self.args)
+        self._jpeg_q: queue.Queue[object] = queue.Queue()
+        self._pts_q: queue.Queue[object] = queue.Queue()
+        self._stderr_tail = ""
+        self._truncated = False
+        self._thread_error: BaseException | None = None
+        self._intentional_stop = False
+        self._closed = False
+        self._out_thread = threading.Thread(target=self._read_stdout, daemon=True, name="ffmpeg-jpeg")
+        self._err_thread = threading.Thread(target=self._read_stderr, daemon=True, name="ffmpeg-showinfo")
+        self._out_thread.start()
+        self._err_thread.start()
+
+    def request_stop(self) -> None:
+        self._intentional_stop = True
+        self._kill()
+
+    def frames(self) -> Iterator[tuple[float, bytes]]:
+        while True:
+            jpeg = self._next_jpeg()
+            if jpeg is None:
+                return
+            pts = self._next_pts()
+            if pts is None:
+                raise self._error("decoded a JPEG without a presentation timestamp")
+            yield pts, jpeg
+
+    def finish(self) -> None:
+        """Wait for ffmpeg after stdout ended or requested frames were yielded."""
+        self._join_io()
+        rc = self._wait_proc()
+        if self._thread_error is not None:
+            raise self._error(f"decoder reader failed: {self._thread_error}") from self._thread_error
+        if self._truncated:
+            raise self._error("truncated JPEG output from ffmpeg")
+        if self._intentional_stop:
+            return
+        if rc not in (0, None):
+            raise self._error("ffmpeg decoder failed")
+
+    def stop_if_still_running(self, timeout: float = 3.0) -> None:
+        """After the requested frames, let -frames:v exit 0; only then treat a hang as our stop."""
+        try:
+            self._proc.wait(timeout=timeout)
+        except Exception:
+            pass
+        if self._proc.poll() is None:
+            self.request_stop()
+
+    def close(self) -> None:
+        if self._closed:
+            return
+        self._closed = True
+        self._kill()
+        self._close_pipes()
+        self._join_io()
+        self._wait_proc()
+
+    def _next_jpeg(self) -> bytes | None:
+        try:
+            item = self._jpeg_q.get(timeout=IO_TIMEOUT_S)
+        except queue.Empty as exc:
+            self.request_stop()
+            raise self._error("timed out waiting for decoded JPEG data") from exc
+        if isinstance(item, BaseException):
+            self._thread_error = item
+            raise self._error(f"JPEG reader failed: {item}") from item
+        if item is _JPEG_END:
+            return None
+        return item  # type: ignore[return-value]
+
+    def _next_pts(self) -> float | None:
+        try:
+            item = self._pts_q.get(timeout=IO_TIMEOUT_S)
+        except queue.Empty as exc:
+            self.request_stop()
+            raise self._error("timed out waiting for a presentation timestamp") from exc
+        if isinstance(item, BaseException):
+            self._thread_error = item
+            raise self._error(f"stderr reader failed: {item}") from item
+        if item is _PTS_END:
+            return None
+        return float(item)
+
+    def _read_stdout(self) -> None:
+        try:
+            assert self._proc.stdout is not None
+            reader = _JpegPipe(self._proc.stdout)
+            while True:
+                jpeg = reader.read_one()
+                if jpeg is None:
+                    break
+                self._jpeg_q.put(jpeg)
+            self._truncated = reader.incomplete
+            self._jpeg_q.put(_JPEG_END)
+        except Exception as exc:  # noqa: BLE001
+            self._jpeg_q.put(exc)
+
+    def _read_stderr(self) -> None:
+        try:
+            assert self._proc.stderr is not None
+            leftover = ""
+            while True:
+                chunk = self._proc.stderr.read(4096)
+                if not chunk:
+                    break
+                text = chunk.decode("utf-8", "replace")
+                self._stderr_tail = (self._stderr_tail + text)[-STDERR_TAIL_CHARS:]
+                leftover += text
+                while "\n" in leftover:
+                    line, leftover = leftover.split("\n", 1)
+                    self._offer_pts(line)
+            self._offer_pts(leftover)
+            self._pts_q.put(_PTS_END)
+        except Exception as exc:  # noqa: BLE001
+            self._pts_q.put(exc)
+
+    def _offer_pts(self, line: str) -> None:
+        match = SHOWINFO_PTS.search(line)
+        if not match:
+            return
+        t = float(match.group("t"))
+        if t >= 0:
+            self._pts_q.put(t)
+
+    def _join_io(self) -> None:
+        self._out_thread.join(timeout=8)
+        self._err_thread.join(timeout=8)
+
+    def _kill(self) -> None:
+        proc = self._proc
+        if proc.poll() is None:
+            proc.kill()
+
+    def _close_pipes(self) -> None:
+        for stream in (self._proc.stdout, self._proc.stderr):
+            if stream is None:
+                continue
+            try:
+                stream.close()
+            except Exception:
+                pass
+
+    def _wait_proc(self) -> int | None:
+        try:
+            return int(self._proc.wait(timeout=8))
+        except Exception:
+            self._kill()
+            try:
+                return int(self._proc.wait(timeout=3))
+            except Exception:
+                return self._proc.poll()
+
+    def _error(self, message: str) -> DecodeError:
+        return DecodeError(
+            message,
+            returncode=self._proc.poll(),
+            stderr_tail=self._stderr_tail,
+        )
+
+
 def iter_decoded_frames(
     info: VideoInfo,
     max_width: int,
@@ -234,88 +485,41 @@ def iter_decoded_frames(
     """One decode pass. If timestamps are given, only those frames are encoded.
 
     start_s, when set, is an input seek. -copyts keeps presentation timestamps
-    on the original recording timeline.
+    on the original recording timeline. Filter graphs are written to a temp file
+    so long recordings stay under the Windows command-line limit.
     """
-    vf_parts: list[str] = []
-    if timestamps:
-        vf_parts.append(f"select={_select_expr(timestamps)}")
-    vf_parts.append("showinfo")
-    scale = _scale_filter(info, max_width)
-    if scale:
-        vf_parts.append(scale)
-    args = [
-        "ffmpeg",
-        "-hide_banner",
-        "-nostdin",
-    ]
-    if start_s is not None and start_s > 0:
-        args.extend(["-ss", f"{start_s:.3f}", "-copyts"])
-    args.extend(
-        [
-            "-i",
-            info.resolved_path,
-            "-an",
-            "-vsync",
-            "0",
-            "-vf",
-            ",".join(vf_parts),
-        ]
-    )
-    if timestamps:
-        args.extend(["-frames:v", str(len(timestamps))])
-    args.extend(
-        [
-            "-f",
-            "image2pipe",
-            "-vcodec",
-            "mjpeg",
-            "-q:v",
-            "2",
-            "pipe:1",
-        ]
-    )
-    proc = ffcmd.popen(args)
-    pts_q: queue.Queue[float | object] = queue.Queue()
-    sentinel = object()
-
-    def read_stderr() -> None:
-        assert proc.stderr is not None
-        leftover = ""
-        while True:
-            chunk = proc.stderr.read(4096)
-            if not chunk:
-                break
-            leftover += chunk.decode("utf-8", "replace")
-            while "\n" in leftover:
-                line, leftover = leftover.split("\n", 1)
-                match = SHOWINFO_PTS.search(line)
-                if match:
-                    t = float(match.group("t"))
-                    if t >= 0:
-                        pts_q.put(t)
-        pts_q.put(sentinel)
-
-    thread = threading.Thread(target=read_stderr, daemon=True, name="ffmpeg-showinfo")
-    thread.start()
+    script = write_filter_script(_filter_graph(info, max_width, timestamps))
+    decoder: FrameDecoder | None = None
     try:
-        assert proc.stdout is not None
-        reader = _JpegPipe(proc.stdout)
-        while True:
-            jpeg = reader.read_one()
-            if jpeg is None:
-                break
-            pts = pts_q.get(timeout=120)
-            if pts is sentinel:
-                break
-            yield float(pts), jpeg
-    finally:
-        if proc.poll() is None:
-            proc.kill()
+        args = build_decode_command(
+            info,
+            max_width,
+            timestamps=timestamps,
+            start_s=start_s,
+            filter_script=script,
+        )
+        decoder = FrameDecoder(args)
+        expected = len(timestamps) if timestamps else None
+        yielded = 0
         try:
-            proc.wait(timeout=8)
-        except Exception:
+            for pts, jpeg in decoder.frames():
+                yield pts, jpeg
+                yielded += 1
+                if expected is not None and yielded >= expected:
+                    decoder.stop_if_still_running()
+                    break
+        except GeneratorExit:
+            if decoder is not None:
+                decoder.request_stop()
+            raise
+        decoder.finish()
+    finally:
+        if decoder is not None:
+            decoder.close()
+        try:
+            script.unlink(missing_ok=True)
+        except OSError:
             pass
-        thread.join(timeout=8)
 
 
 def _ensure_max_width(path: Path, max_width: int) -> None:
@@ -496,29 +700,32 @@ def _fill_from_sequential_decode(
         stream = iter_decoded_frames(info, max_width, times)
     else:
         stream = source(info, max_width)
-    for pts, jpeg in stream:
-        decoded += 1
-        last_jpeg, last_pts = jpeg, pts
-        while pending_i < len(pending) and pts + 1e-4 >= candidates[pending[pending_i]].requested_time:
-            idx = pending[pending_i]
-            _write_shot(
-                candidates[idx],
-                idx,
-                pts,
-                jpeg,
-                job_frames,
-                records,
-                notes=[],
-            )
-            if progress:
-                done = sum(1 for rec in records if rec is not None)
-                progress(
-                    "frames",
-                    f"Captured {done}/{len(candidates)} at {format_timecode(pts)}",
+    try:
+        for pts, jpeg in stream:
+            decoded += 1
+            last_jpeg, last_pts = jpeg, pts
+            while pending_i < len(pending) and pts + 1e-4 >= candidates[pending[pending_i]].requested_time:
+                idx = pending[pending_i]
+                _write_shot(
+                    candidates[idx],
+                    idx,
+                    pts,
+                    jpeg,
+                    job_frames,
+                    records,
+                    notes=[],
                 )
-            pending_i += 1
-        if pending_i >= len(pending):
-            break
+                if progress:
+                    done = sum(1 for rec in records if rec is not None)
+                    progress(
+                        "frames",
+                        f"Captured {done}/{len(candidates)} at {format_timecode(pts)}",
+                    )
+                pending_i += 1
+            if pending_i >= len(pending):
+                break
+    except DecodeError:
+        raise
     if pending_i < len(pending) and source is iter_decoded_frames:
         last_jpeg, last_pts, extra = _scan_true_last_frame(info, max_width, last_jpeg, last_pts)
         decoded += extra

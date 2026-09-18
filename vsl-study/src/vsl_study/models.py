@@ -52,7 +52,7 @@ class ProcessSettings:
         extras = ",".join(f"{t:.3f}" for t in extra_times)
         return (
             f"{fingerprint}|{self.detector}|{self.interval:.3f}|"
-            f"{self.scene_start_offset:.3f}|{self.max_width}|{extras}|seq-pts-3"
+            f"{self.scene_start_offset:.3f}|{self.max_width}|{extras}|seq-pts-4"
         )
 
 
