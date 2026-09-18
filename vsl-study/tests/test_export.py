@@ -2,6 +2,8 @@ import json
 import zipfile
 from pathlib import Path
 
+import pytest
+
 from vsl_study.cache import JobDir, atomic_write_text
 from vsl_study.export import write_five_minute_folders, write_zip
 from vsl_study.models import ScreenshotRecord, TranscriptResult, TranscriptSegment, VideoInfo
@@ -104,3 +106,34 @@ def test_zip_excludes_audio_and_preserves_relative_html(tmp_path: Path):
     html = (extract / "report.html").read_text(encoding="utf-8")
     assert 'src="frames/frame_0001.jpg"' in html
     assert (extract / "frames" / "frame_0001.jpg").exists()
+
+
+def test_zip_includes_packaged_media_when_enabled(tmp_path: Path):
+    from vsl_study.export import package_source_media, write_zip
+
+    job = JobDir(tmp_path / "job")
+    job.ensure()
+    source = tmp_path / "recording.fixed.mp4"
+    source.write_bytes(b"videobytes" * 1000)
+    packaged = package_source_media(job, source)
+    (job.root / "report.html").write_text('<html><img src="frames/a.jpg"></html>', encoding="utf-8")
+    (job.frames / "a.jpg").write_bytes(b"jpeg")
+    (job.cache / "audio.wav").write_bytes(b"RIFF")
+    zpath = write_zip(job, include_media=True, packaged_media=packaged)
+    with zipfile.ZipFile(zpath) as zf:
+        names = zf.namelist()
+        assert packaged["relative_path"] in names
+        assert zf.read(packaged["relative_path"]) == source.read_bytes()
+        assert "cache/audio.wav" in names
+        extract = tmp_path / "out"
+        zf.extractall(extract)
+    assert (extract / packaged["relative_path"]).read_bytes() == source.read_bytes()
+
+
+def test_zip_without_requested_media_cannot_succeed(tmp_path: Path):
+    job = JobDir(tmp_path / "job")
+    job.ensure()
+    atomic_write_text(job.root / "report.html", "<html></html>")
+    with pytest.raises(RuntimeError, match="source recording was not copied"):
+        write_zip(job, include_media=True, packaged_media=None)
+

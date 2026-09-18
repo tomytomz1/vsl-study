@@ -15,7 +15,7 @@ from tkinter import BooleanVar, StringVar, Tk, filedialog, messagebox, ttk
 from tkinter.scrolledtext import ScrolledText
 import tkinter as tk
 
-from vsl_study.capture_meta import apply_desktop_capture_event
+from vsl_study.capture_meta import apply_desktop_capture_event, resolve_capture_for_source
 from vsl_study.models import ProcessSettings
 from vsl_study.transcribe import SettingsError, validate_model_language
 
@@ -595,6 +595,7 @@ class VSLStudyApp:
             value=_label_for(SPEECH_OUTPUT_OPTIONS, task, SPEECH_OUTPUT_OPTIONS[0][0])
         )
         self.ocr_var = BooleanVar(value=bool(prefs["ocr_on"]) if "ocr_on" in prefs else False)
+        self.media_var = BooleanVar(value=bool(prefs["include_media"]) if "include_media" in prefs else False)
         self.status_var = StringVar(value="Choose a video and a folder.")
         self.running = False
         self.capturing = False
@@ -646,7 +647,10 @@ class VSLStudyApp:
             self.run_btn.configure(font=("Segoe UI", 11, "bold"))
         if hasattr(self, "ocr_mark"):
             self.ocr_mark.set_size(self.layout.px(28))
+        if hasattr(self, "media_mark"):
+            self.media_mark.set_size(self.layout.px(28))
         self._refresh_ocr()
+        self._refresh_media()
         self._update_wrap()
 
     def _update_wrap(self) -> None:
@@ -658,6 +662,8 @@ class VSLStudyApp:
             self.status_label.configure(wraplength=inner)
         if hasattr(self, "ocr_caption"):
             self.ocr_caption.configure(wraplength=max(200, inner - self.layout.px(80)))
+        if hasattr(self, "media_caption"):
+            self.media_caption.configure(wraplength=max(200, inner - self.layout.px(80)))
 
     def _refresh_monitor(self) -> None:
         layout = read_monitor_layout(self._hwnd())
@@ -760,6 +766,35 @@ class VSLStudyApp:
         for widget in (self.ocr_title, self.ocr_caption, ocr_text, ocr_row):
             widget.bind("<Button-1>", self._toggle_ocr)
         self._refresh_ocr()
+
+        media_row = tk.Frame(main, bg=BG)
+        media_row.pack(fill="x", pady=(self.layout.px(14), 0))
+        self.media_mark = BigCheck(
+            media_row,
+            self.media_var,
+            size=self.layout.px(28),
+            command=self._refresh_media,
+        )
+        self.media_mark.pack(side="left", anchor="n", pady=(self.layout.px(1), 0))
+        media_text = tk.Frame(media_row, bg=BG)
+        media_text.pack(side="left", fill="x", expand=True, padx=(self.layout.px(12), 0))
+        self.media_title = tk.Label(
+            media_text, text="Include the recording in the ZIP", bg=BG, fg=INK, font=("Segoe UI", 11), anchor="w", cursor="hand2"
+        )
+        self.media_title.pack(fill="x")
+        self.media_caption = tk.Label(
+            media_text,
+            text="Turn this on to put the video file inside the evidence ZIP. The package will be much larger.",
+            bg=BG,
+            fg=MUTED,
+            font=("Segoe UI", 9),
+            anchor="w",
+            cursor="hand2",
+        )
+        self.media_caption.pack(fill="x")
+        for widget in (self.media_title, self.media_caption, media_text, media_row):
+            widget.bind("<Button-1>", self._toggle_media)
+        self._refresh_media()
 
         self.run_btn = tk.Button(
             main,
@@ -910,6 +945,18 @@ class VSLStudyApp:
         self.ocr_title.configure(fg=INK if on else MUTED)
         if hasattr(self, "ocr_mark"):
             self.ocr_mark._draw()
+
+    def _toggle_media(self, _event=None) -> None:  # noqa: ANN001
+        self.media_var.set(not bool(self.media_var.get()))
+        self._refresh_media()
+
+    def _refresh_media(self) -> None:
+        if not hasattr(self, "media_title"):
+            return
+        on = bool(self.media_var.get())
+        self.media_title.configure(fg=INK if on else MUTED)
+        if hasattr(self, "media_mark"):
+            self.media_mark._draw()
 
     def _set_running(self, running: bool) -> None:
         self.running = running
@@ -1170,7 +1217,8 @@ class VSLStudyApp:
         if not dest:
             messagebox.showwarning("VSL Study", "Choose a folder to save the results.", parent=self.root)
             return
-        settings = self._snapshot_settings()
+        capture, notes = resolve_capture_for_source(source)
+        settings = self._snapshot_settings(capture)
         if settings is None:
             return
         _save_prefs(
@@ -1181,8 +1229,12 @@ class VSLStudyApp:
                 "language": settings.language,
                 "task": settings.task,
                 "ocr_on": settings.ocr,
+                "include_media": settings.include_media,
             }
         )
+        if notes:
+            for note in notes:
+                self._append_log("inspect", note)
         self._start_process(source, dest, settings)
 
     def _snapshot_settings(self, capture: dict | None = None) -> ProcessSettings | None:
@@ -1199,6 +1251,7 @@ class VSLStudyApp:
             detector="adaptive",
             interval=5.0,
             ocr=bool(self.ocr_var.get()),
+            include_media=bool(self.media_var.get()),
             device="auto",
             capture=dict(capture) if capture else None,
         )

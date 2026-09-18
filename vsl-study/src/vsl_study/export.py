@@ -3,9 +3,11 @@
 from __future__ import annotations
 
 import csv
+import hashlib
 import html
 import io
 import json
+import os
 import shutil
 import zipfile
 from importlib.resources import files
@@ -25,6 +27,69 @@ from vsl_study.models import (
 from vsl_study.ocr import format_onscreen_text
 from vsl_study.timeutil import format_timecode, windows_5min
 
+PACKAGED_MEDIA_DIR = "media"
+VIDEO_SUFFIXES = {".mp4", ".mov", ".mkv", ".webm"}
+COPY_CHUNK = 1024 * 1024
+
+
+def sha256_file(path: Path, chunk_size: int = COPY_CHUNK) -> str:
+    digest = hashlib.sha256()
+    with path.open("rb") as handle:
+        while True:
+            block = handle.read(chunk_size)
+            if not block:
+                break
+            digest.update(block)
+    return digest.hexdigest()
+
+
+def package_source_media(job: JobDir, source: str | Path) -> dict[str, Any]:
+    """Copy the processed source video into the job folder without loading it all at once."""
+    src = Path(source)
+    if not src.is_file():
+        raise RuntimeError(f"Source recording is missing: {src}")
+    name = src.name
+    if not name or name in {".", ".."} or "/" in name or "\\" in name:
+        name = f"source{src.suffix.lower() or '.bin'}"
+    dest_dir = job.root / PACKAGED_MEDIA_DIR
+    dest_dir.mkdir(parents=True, exist_ok=True)
+    dest = dest_dir / name
+    tmp = dest.with_name(dest.name + ".part")
+    digest = hashlib.sha256()
+    size = 0
+    expected = src.stat().st_size
+    try:
+        if tmp.exists():
+            tmp.unlink()
+        with src.open("rb") as inf, tmp.open("wb") as out:
+            while True:
+                block = inf.read(COPY_CHUNK)
+                if not block:
+                    break
+                out.write(block)
+                digest.update(block)
+                size += len(block)
+            out.flush()
+            os.fsync(out.fileno())
+        if size != expected:
+            raise RuntimeError(
+                f"Copied {size} bytes but the source recording is {expected} bytes"
+            )
+        os.replace(tmp, dest)
+    except Exception:
+        try:
+            if tmp.exists():
+                tmp.unlink()
+        except OSError:
+            pass
+        raise
+    return {
+        "relative_path": f"{PACKAGED_MEDIA_DIR}/{name}".replace("\\", "/"),
+        "sha256": digest.hexdigest(),
+        "size_bytes": size,
+        "original_name": src.name,
+    }
+
 
 def _capture_markdown_lines(capture: dict[str, Any]) -> list[str]:
     url = capture.get("source_url_user_supplied") or ""
@@ -37,6 +102,18 @@ def _capture_markdown_lines(capture: dict[str, Any]) -> list[str]:
         lines.append(f"- Address the user typed (not proof of the selected tab): `{url}`")
     if capture.get("title"):
         lines.append(f"- Title: {capture.get('title')}")
+    if capture.get("audio_track") or capture.get("audio_detected"):
+        lines.append(
+            "- Audio: "
+            + (
+                f"share-tab audio claimed={bool(capture.get('audio_track'))}, "
+                f"detected={bool(capture.get('audio_detected'))}"
+            )
+        )
+    if capture.get("started_at") or capture.get("ended_at"):
+        lines.append(
+            f"- Capture window: {capture.get('started_at') or '?'} → {capture.get('ended_at') or '?'}"
+        )
     if capture.get("media_duration_s") is not None:
         lines.append(f"- Recorded media duration: {capture.get('media_duration_s')}s")
     if not capture.get("complete"):
@@ -209,40 +286,70 @@ def write_reports(
     gaps: list[dict[str, Any]],
     versions: dict[str, str],
     stage_status: dict[str, Any],
+    packaged_media: dict[str, Any] | None = None,
 ) -> None:
     write_contact_sheet(screenshots, job.root, job.contact_sheets / "all.jpg")
     retained = [s for s in screenshots if s.compact_retained]
     if settings.compact_view:
         write_contact_sheet(retained, job.root, job.contact_sheets / "compact.jpg")
     _write_markdown(
-        job, info, settings, transcript, scenes, screenshots, gaps, versions, stage_status
+        job, info, settings, transcript, scenes, screenshots, gaps, versions, stage_status, packaged_media
     )
     _write_html(
-        job, info, settings, transcript, scenes, screenshots, gaps, versions, stage_status
+        job, info, settings, transcript, scenes, screenshots, gaps, versions, stage_status, packaged_media
     )
 
 
-def write_zip(job: JobDir, include_media: bool) -> Path:
+def write_zip(
+    job: JobDir,
+    include_media: bool,
+    packaged_media: dict[str, Any] | None = None,
+) -> Path:
     zip_path = job.root / "vsl_study_evidence.zip"
+    packaged_rel = ""
+    if include_media:
+        if not packaged_media or not packaged_media.get("relative_path"):
+            raise RuntimeError(
+                "Include media was requested, but the source recording was not copied into the package."
+            )
+        packaged_rel = str(packaged_media["relative_path"]).replace("\\", "/")
+        media_file = job.root / packaged_rel
+        if not media_file.is_file():
+            raise RuntimeError(
+                f"Include media was requested, but {packaged_rel} is missing from the job folder."
+            )
     skip_names = {zip_path.name}
-    skip_dirs = {"work"}
-    if not include_media:
-        skip_dirs.add("work")
     with zipfile.ZipFile(zip_path, "w", compression=zipfile.ZIP_DEFLATED) as zf:
         for path in job.root.rglob("*"):
             if not path.is_file():
                 continue
             rel = path.relative_to(job.root)
             parts = rel.parts
-            if parts[0] in skip_dirs:
+            posix = rel.as_posix()
+            if parts[0] == "work":
                 continue
             if rel.name in skip_names:
                 continue
-            if not include_media and rel.as_posix() == "cache/audio.wav":
+            if posix == "cache/audio.wav" and not include_media:
                 continue
-            if path.suffix.lower() in {".mp4", ".mov", ".mkv", ".webm"} and "frames" not in parts:
+            if parts[0] == PACKAGED_MEDIA_DIR and not include_media:
                 continue
-            zf.write(path, rel.as_posix())
+            suffix = path.suffix.lower()
+            if suffix in VIDEO_SUFFIXES and "frames" not in parts:
+                if not include_media or posix != packaged_rel:
+                    continue
+            compress = zipfile.ZIP_STORED if suffix in VIDEO_SUFFIXES else zipfile.ZIP_DEFLATED
+            zf.write(path, posix, compress_type=compress)
+    if include_media:
+        with zipfile.ZipFile(zip_path) as zf:
+            if packaged_rel not in zf.namelist():
+                try:
+                    zip_path.unlink()
+                except OSError:
+                    pass
+                raise RuntimeError(
+                    "The evidence ZIP was written without the source recording. The package is incomplete."
+                )
     return zip_path
 
 
@@ -256,6 +363,7 @@ def _write_markdown(
     gaps: list[dict[str, Any]],
     versions: dict[str, str],
     stage_status: dict[str, Any],
+    packaged_media: dict[str, Any] | None = None,
 ) -> None:
     lines: list[str] = [
         "# VSL Study report",
@@ -270,6 +378,13 @@ def _write_markdown(
         "## Processing notes",
         "",
     ]
+    if packaged_media and packaged_media.get("relative_path"):
+        lines.append(
+            f"- Recording inside this package: `{packaged_media['relative_path']}` "
+            "(use this relative path after unzipping; it does not depend on the original computer path)"
+        )
+        if packaged_media.get("sha256"):
+            lines.append(f"- Packaged recording SHA-256: `{packaged_media['sha256']}`")
     if info.video_duration_s:
         lines.append(f"- Video stream duration: {info.video_duration_s:.3f}s (screenshots use this bound, not audio length)")
     if not info.fps_trusted:
@@ -361,6 +476,7 @@ def _write_html(
     gaps: list[dict[str, Any]],
     versions: dict[str, str],
     stage_status: dict[str, Any],
+    packaged_media: dict[str, Any] | None = None,
 ) -> None:
     shot_by_time = screenshots
     events: list[str] = []
@@ -423,6 +539,17 @@ def _write_html(
         )
 
     notes = "".join(f"<li>{html.escape(n)}</li>" for n in info.notes)
+    if packaged_media and packaged_media.get("relative_path"):
+        notes += (
+            f"<li>Recording inside this package: "
+            f"<code>{html.escape(str(packaged_media['relative_path']))}</code> "
+            "(use this relative path after unzipping)</li>"
+        )
+        if packaged_media.get("sha256"):
+            notes += (
+                f"<li>Packaged recording SHA-256: "
+                f"<code>{html.escape(str(packaged_media['sha256']))}</code></li>"
+            )
     capture = getattr(settings, "capture", None)
     if capture:
         notes += _capture_html_items(capture)
@@ -462,7 +589,8 @@ code, pre {{ font-family: Consolas, monospace; }}
 <body>
 <h1>VSL Study report</h1>
 <p>Offline timeline. Images are relative files next to this HTML. No remote scripts.</p>
-<p>Source <code>{html.escape(info.resolved_path)}</code><br>
+<p>Processed from <code>{html.escape(info.resolved_path)}</code><br>
+{("Recording in this package: <code>" + html.escape(str(packaged_media.get("relative_path"))) + "</code><br>") if packaged_media and packaged_media.get("relative_path") else ""}
 Duration {html.escape(format_timecode(info.duration_s))} · {info.width}x{info.height} ·
 audio {"yes" if info.has_audio else "no"} · model {html.escape(str(transcript.model))} ·
 device {html.escape(str(transcript.device))}</p>

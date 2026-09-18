@@ -3,12 +3,15 @@
 from __future__ import annotations
 
 import traceback
+from dataclasses import replace
 from pathlib import Path
 from typing import Any, Callable
 
 from vsl_study.align import CONTEXT_WINDOW_NOTE, match_screenshots
 from vsl_study.cache import JobConflictError, JobDir, identity_from_info
+from vsl_study.capture_meta import resolve_capture_for_source, write_portable_capture
 from vsl_study.export import (
+    package_source_media,
     write_ai_prompt,
     write_five_minute_folders,
     write_reports,
@@ -109,6 +112,8 @@ def process_video(
     src = Path(input_path)
     job = JobDir(Path(output_dir))
     job.ensure()
+    capture, capture_notes = resolve_capture_for_source(src, settings.capture)
+    settings = replace(settings, capture=capture)
     _progress(progress, "inspect", "Validating input and inspecting streams")
     info = inspect_video(src, progress=progress)
     identity = identity_from_info(info)
@@ -116,6 +121,8 @@ def process_video(
         job.bind_source(identity, settings)
     except JobConflictError:
         raise
+    if capture:
+        write_portable_capture(job.root, capture)
 
     inspect_key = f"{info.fingerprint}|{INSPECT_CACHE_VERSION}"
     cached_inspect = job.read_complete_stage("inspect", inspect_key)
@@ -153,7 +160,12 @@ def process_video(
         )
     for note in info.notes:
         processing_gaps.append({"type": "media_note", "detail": note})
+    for note in capture_notes:
+        processing_gaps.append({"type": "capture_metadata", "detail": note})
     capture = settings.capture or (job.load_job() or {}).get("capture")
+    if capture:
+        write_portable_capture(job.root, capture)
+        settings = replace(settings, capture=capture)
     if capture and not capture.get("complete"):
         processing_gaps.append(
             {
@@ -196,6 +208,7 @@ def process_video(
             "ocr": settings.ocr,
             "context_window_s": settings.context_window_s,
             "compact_view": settings.compact_view,
+            "include_media": settings.include_media,
         },
         "alignment_note": CONTEXT_WINDOW_NOTE,
         "dependency_versions": versions,
@@ -208,6 +221,23 @@ def process_video(
     capture = settings.capture or (job.load_job() or {}).get("capture")
     if capture:
         manifest["capture"] = capture
+    packaged_media = None
+    export_key = f"{info.fingerprint}|reports|{settings.interval:.3f}|ocr={settings.ocr}|media={int(settings.include_media)}"
+    if settings.include_media:
+        _progress(progress, "export", "Copying the source recording into the evidence package")
+        try:
+            packaged_media = package_source_media(job, info.resolved_path)
+        except Exception as exc:  # noqa: BLE001
+            job.write_stage(
+                "export",
+                export_key,
+                "failed",
+                {"error": str(exc), "traceback": traceback.format_exc()},
+            )
+            raise PipelineError(
+                f"Could not include the source recording in the evidence package: {exc}"
+            ) from exc
+        manifest["packaged_media"] = packaged_media
     from vsl_study.cache import atomic_write_json
 
     atomic_write_json(job.root / "manifest.json", manifest)
@@ -221,13 +251,23 @@ def process_video(
         processing_gaps,
         versions,
         stage_status,
+        packaged_media=packaged_media,
     )
-    zip_path = write_zip(job, settings.include_media)
+    try:
+        zip_path = write_zip(job, settings.include_media, packaged_media=packaged_media)
+    except Exception as exc:  # noqa: BLE001
+        job.write_stage(
+            "export",
+            export_key,
+            "failed",
+            {"error": str(exc), "traceback": traceback.format_exc()},
+        )
+        raise PipelineError(f"Evidence ZIP is incomplete: {exc}") from exc
     job.write_stage(
         "export",
-        f"{info.fingerprint}|reports|{settings.interval:.3f}|ocr={settings.ocr}",
+        export_key,
         "complete",
-        {"zip": zip_path.name},
+        {"zip": zip_path.name, "packaged_media": packaged_media},
     )
     _progress(progress, "done", f"Wrote evidence package to {job.root}")
     return {
