@@ -15,6 +15,52 @@ SUPPORTED_SUFFIXES = {".mp4", ".mov", ".mkv", ".webm"}
 ProgressCb = Callable[[str, str], None]
 
 
+def _parse_clock_duration(raw: str | None) -> float | None:
+    if not raw or raw in {"N/A", "0/0"}:
+        return None
+    text = str(raw).strip()
+    try:
+        return float(text)
+    except (TypeError, ValueError):
+        pass
+    parts = text.split(":")
+    try:
+        if len(parts) == 3:
+            hours, minutes, seconds = parts
+            return int(hours) * 3600 + int(minutes) * 60 + float(seconds)
+        if len(parts) == 2:
+            minutes, seconds = parts
+            return int(minutes) * 60 + float(seconds)
+    except (TypeError, ValueError):
+        return None
+    return None
+
+
+def _stream_duration_s(stream: dict[str, Any] | None) -> float | None:
+    if not stream:
+        return None
+    direct = _parse_clock_duration(stream.get("duration"))
+    if direct and direct > 0:
+        return direct
+    tags = stream.get("tags") or {}
+    for key in ("DURATION", "duration"):
+        tagged = _parse_clock_duration(tags.get(key) if isinstance(tags, dict) else None)
+        if tagged and tagged > 0:
+            return tagged
+    return None
+
+
+def _fps_trusted(stream: dict[str, Any], fps: float | None) -> bool:
+    if fps is None or fps <= 0:
+        return False
+    if fps >= 200:
+        return False
+    time_base = str(stream.get("time_base") or "")
+    if time_base == "1/1000" and abs(fps - 1000.0) < 1.0:
+        return False
+    return True
+
+
 def _parse_fraction(value: str | None) -> float | None:
     if not value or value in {"0/0", "N/A"}:
         return None
@@ -127,7 +173,21 @@ def inspect_video(path: Path, progress: ProgressCb | None = None) -> VideoInfo:
     width = int(v["width"]) if v.get("width") else None
     height = int(v["height"]) if v.get("height") else None
     notes: list[str] = []
-    vfr = _is_vfr(v)
+    fps_avg = _parse_fraction(v.get("avg_frame_rate"))
+    fps_trusted = _fps_trusted(v, fps_avg)
+    if not fps_trusted:
+        notes.append(
+            f"Container reports {fps_avg:g} FPS from timestamp units; this is not a measured capture frame rate."
+            if fps_avg
+            else "Average frame rate is missing or unusable; screenshot times use presentation timestamps."
+        )
+    video_duration_s = _stream_duration_s(v)
+    if video_duration_s and abs(video_duration_s - duration) > 0.05:
+        notes.append(
+            f"Video stream duration is {video_duration_s:.3f}s; container/audio duration is {duration:.3f}s. "
+            "Screenshots stop at the last available video frame. Speech after that still uses the full soundtrack."
+        )
+    vfr = _is_vfr(v) if fps_trusted else True
     if vfr:
         notes.append(
             "Variable frame rate detected. Screenshot times use presentation timestamps "
@@ -155,7 +215,7 @@ def inspect_video(path: Path, progress: ProgressCb | None = None) -> VideoInfo:
         duration_s=duration,
         width=width,
         height=height,
-        fps_avg=_parse_fraction(v.get("avg_frame_rate")),
+        fps_avg=fps_avg,
         fps_r=v.get("r_frame_rate"),
         time_base=v.get("time_base"),
         video_start_s=video_start,
@@ -168,6 +228,8 @@ def inspect_video(path: Path, progress: ProgressCb | None = None) -> VideoInfo:
         format_name=str(fmt.get("format_name") or ""),
         audio_codec=(a or {}).get("codec_name"),
         video_codec=v.get("codec_name"),
+        video_duration_s=video_duration_s,
+        fps_trusted=fps_trusted,
         notes=notes,
         probe=probe,
     )

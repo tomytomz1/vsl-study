@@ -55,27 +55,49 @@ def detect_scenes(
                 id="scene_0001",
                 start=0.0,
                 end=info.duration_s,
-                start_frame=0,
+                start_frame=None,
                 end_frame=None,
             )
         )
         return scenes
+    video_end = info.video_duration_s if info.video_duration_s and info.video_duration_s > 0 else None
     for index, (start_tc, end_tc) in enumerate(pairs, start=1):
-        start_s = float(start_tc.seconds)
-        end_s = float(end_tc.seconds)
+        start_s = max(0.0, float(start_tc.seconds))
+        end_s = max(start_s, float(end_tc.seconds))
         if index == len(pairs):
             end_s = max(end_s, info.duration_s)
+            if video_end is not None:
+                # Keep the last scene covering the recording timeline, including
+                # any audio-only tail after the final video frame.
+                end_s = max(end_s, info.duration_s)
+        start_frame, end_frame = _scene_frame_indices(info, start_tc, end_tc)
         scenes.append(
             Scene(
                 id=f"scene_{index:04d}",
-                start=max(0.0, start_s),
+                start=start_s,
                 end=min(info.duration_s, max(end_s, start_s)),
-                start_frame=int(start_tc.frame_num),
-                end_frame=int(end_tc.frame_num),
+                start_frame=start_frame,
+                end_frame=end_frame,
             )
         )
     if scenes and scenes[-1].end < info.duration_s:
         scenes[-1].end = info.duration_s
     if scenes and scenes[0].start > 0:
         scenes[0].start = 0.0
+        scenes[0].start_frame = None
     return scenes
+
+
+def _scene_frame_indices(info: VideoInfo, start_tc, end_tc) -> tuple[int | None, int | None]:
+    if not info.fps_trusted:
+        return None, None
+    try:
+        start_f = int(start_tc.frame_num)
+        end_f = int(end_tc.frame_num)
+    except (TypeError, ValueError, AttributeError):
+        return None, None
+    if end_f < start_f:
+        return None, None
+    if start_f < 0 or end_f < 0:
+        return None, None
+    return start_f, end_f

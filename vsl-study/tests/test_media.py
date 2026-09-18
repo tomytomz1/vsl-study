@@ -39,3 +39,14 @@ def test_vfr_or_notes(tmp_path: Path):
     info = inspect_video(video)
     assert info.duration_s > 0
     assert info.has_video
+
+
+@requires_ffmpeg
+def test_audio_stream_can_outlast_video(tmp_path: Path):
+    from conftest import write_audio_longer_than_video
+
+    video = write_audio_longer_than_video(tmp_path / "tail.mkv")
+    info = inspect_video(video)
+    assert info.has_audio and info.has_video
+    if info.video_duration_s:
+        assert info.video_duration_s <= info.duration_s + 0.05

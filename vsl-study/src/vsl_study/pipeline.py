@@ -45,6 +45,7 @@ from vsl_study.transcribe import (
 )
 
 ProgressCb = Callable[[str, str], None]
+INSPECT_CACHE_VERSION = "media-v2"
 
 
 class PipelineError(RuntimeError):
@@ -116,7 +117,7 @@ def process_video(
     except JobConflictError:
         raise
 
-    inspect_key = info.fingerprint
+    inspect_key = f"{info.fingerprint}|{INSPECT_CACHE_VERSION}"
     cached_inspect = job.read_complete_stage("inspect", inspect_key)
     if cached_inspect is None:
         job.write_stage("inspect", inspect_key, "complete", {"info": info.to_dict()})
@@ -174,7 +175,9 @@ def process_video(
             "height": info.height,
             "fps_avg": info.fps_avg,
             "fps_r": info.fps_r,
+            "fps_trusted": info.fps_trusted,
             "time_base": info.time_base,
+            "video_duration_s": info.video_duration_s,
             "video_start_s": info.video_start_s,
             "audio_start_s": info.audio_start_s,
             "rotation": info.rotation,
@@ -242,7 +245,11 @@ def add_frames_at(job_dir: str | Path, timestamps: list[float], progress: Progre
     meta = job.load_job()
     if not meta or not meta.get("source"):
         raise PipelineError(f"Not a VSL Study job directory: {job.root}")
-    inspect_data = job.read_complete_stage("inspect", meta["source"]["fingerprint"])
+    inspect_data = job.read_complete_stage(
+        "inspect", f"{meta['source']['fingerprint']}|{INSPECT_CACHE_VERSION}"
+    )
+    if not inspect_data:
+        inspect_data = job.read_complete_stage("inspect", meta["source"]["fingerprint"])
     if not inspect_data:
         raise PipelineError("Job is missing a complete inspect stage.")
     info = VideoInfo.from_dict(inspect_data["info"])
@@ -370,7 +377,7 @@ def _stage_frames(
 
         try:
             prev = read_json(old)
-            if prev.get("status") == "complete":
+            if prev.get("status") == "complete" and prev.get("cache_key") == key:
                 for rec in prev.get("screenshots") or []:
                     shot = ScreenshotRecord.from_dict(rec)
                     existing[f"{shot.capture_reason}:{shot.requested_time:.3f}"] = shot
@@ -384,21 +391,57 @@ def _stage_frames(
         scene_start_offset=settings.scene_start_offset,
         extra_times=extra_times,
     )
-    job.write_stage("frames", key, "running", {"count": len(candidates)})
-    records = capture_candidates(
-        info,
-        scenes,
-        job.frames,
-        settings.max_width,
-        candidates,
-        existing=existing,
-        progress=progress,
+    job.write_stage(
+        "frames",
+        key,
+        "running",
+        {"scheduled": len(candidates), "completed": 0},
     )
+
+    def frames_progress(stage: str, message: str) -> None:
+        _progress(progress, stage, message)
+        if stage != "frames":
+            return
+        done = sum(1 for path in job.frames.glob("frame_*.jpg") if path.is_file())
+        job.write_stage(
+            "frames",
+            key,
+            "running",
+            {"scheduled": len(candidates), "completed": done},
+        )
+
+    try:
+        records = capture_candidates(
+            info,
+            scenes,
+            job.frames,
+            settings.max_width,
+            candidates,
+            existing=existing,
+            progress=frames_progress,
+        )
+    except Exception as exc:  # noqa: BLE001
+        job.write_stage(
+            "frames",
+            key,
+            "failed",
+            {
+                "scheduled": len(candidates),
+                "completed": 0,
+                "error": str(exc),
+                "traceback": traceback.format_exc(),
+            },
+        )
+        raise PipelineError(f"Screenshot extraction failed: {exc}") from exc
     job.write_stage(
         "frames",
         key,
         "complete",
-        {"screenshots": [s.to_dict() for s in records]},
+        {
+            "scheduled": len(candidates),
+            "completed": len(records),
+            "screenshots": [s.to_dict() for s in records],
+        },
     )
     return records
 

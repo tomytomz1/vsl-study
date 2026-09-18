@@ -207,6 +207,33 @@ def mux_speech_video(dest: Path, wav: Path, duration: float = 4.0) -> Path:
     return dest
 
 
+def write_audio_longer_than_video(dest: Path) -> Path:
+    """Video ends near 1s; audio continues to ~2.5s (no frozen-frame pad)."""
+    dest.parent.mkdir(parents=True, exist_ok=True)
+    run_ffmpeg(
+        [
+            "-f",
+            "lavfi",
+            "-i",
+            "color=c=orange:s=320x240:d=1:r=25",
+            "-f",
+            "lavfi",
+            "-i",
+            "sine=frequency=440:duration=2.5",
+            "-pix_fmt",
+            "yuv420p",
+            "-c:v",
+            "libx264",
+            "-c:a",
+            "aac",
+            "-f",
+            "matroska",
+            str(dest),
+        ]
+    )
+    return dest
+
+
 def mux_offset_speech(dest: Path, wav: Path) -> Path:
     dest.parent.mkdir(parents=True, exist_ok=True)
     run_ffmpeg(

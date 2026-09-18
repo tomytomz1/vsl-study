@@ -66,3 +66,26 @@ def run(
             stderr=(result.stderr or "")[-4000:],
         )
     return result
+
+
+def popen(
+    args: Sequence[str],
+    *,
+    stdout: int | None = subprocess.PIPE,
+    stderr: int | None = subprocess.PIPE,
+    cwd: str | Path | None = None,
+    env: dict[str, str] | None = None,
+) -> subprocess.Popen[bytes]:
+    merged_env = os.environ.copy()
+    if env:
+        merged_env.update(env)
+    return subprocess.Popen(
+        list(args),
+        stdout=stdout,
+        stderr=stderr,
+        cwd=str(cwd) if cwd else None,
+        env=merged_env,
+        shell=False,
+        bufsize=0,
+        **_hidden_kwargs(),
+    )

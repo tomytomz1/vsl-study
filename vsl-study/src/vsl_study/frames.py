@@ -2,10 +2,12 @@
 
 from __future__ import annotations
 
+import queue
 import re
+import threading
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Callable, Iterable
+from typing import Callable, Iterable, Iterator
 
 from PIL import Image, ImageDraw, ImageFont
 
@@ -15,6 +17,8 @@ from vsl_study.timeutil import clamp_time, format_filename_time, format_timecode
 
 ProgressCb = Callable[[str, str], None]
 SHOWINFO_PTS = re.compile(r"pts_time:(?P<t>-?\d+(?:\.\d+)?)")
+JPEG_SOI = b"\xff\xd8"
+JPEG_EOI = b"\xff\xd9"
 
 
 @dataclass
@@ -24,11 +28,25 @@ class CaptureCandidate:
     scene_id: str | None
 
 
+def image_end_time(info: VideoInfo) -> float:
+    """Last time at which a real video image can exist.
+
+    Container/audio duration is not used as the image boundary when a video
+    stream duration is known. Untrusted 1000-FPS metadata is not used as a
+    frame-step margin.
+    """
+    video_end = info.video_duration_s
+    if video_end is not None and video_end > 0:
+        return min(float(video_end), info.duration_s)
+    if info.fps_trusted:
+        fps = info.fps_avg if info.fps_avg and info.fps_avg > 1 else 25.0
+        margin = max(1.5 / fps, 0.08)
+        return max(0.0, info.duration_s - margin)
+    return max(0.0, info.duration_s)
+
+
 def last_safe_time(info: VideoInfo) -> float:
-    """Stay at least ~1.5 frames before duration so ffmpeg can decode a real last frame."""
-    fps = info.fps_avg if info.fps_avg and info.fps_avg > 1 else 25.0
-    margin = max(1.5 / fps, 0.08)
-    return max(0.0, info.duration_s - margin)
+    return image_end_time(info)
 
 
 def scene_for_time(scenes: list[Scene], t: float) -> Scene | None:
@@ -49,7 +67,7 @@ def build_candidates(
     scene_start_offset: float,
     extra_times: Iterable[float] = (),
 ) -> list[CaptureCandidate]:
-    duration = info.duration_s
+    duration = image_end_time(info)
     items: list[CaptureCandidate] = []
     end_cap = last_safe_time(info)
     for scene in scenes:
@@ -85,12 +103,11 @@ def build_candidates(
     return ordered
 
 
-def _parse_actual_time(stderr: str, requested: float) -> float:
+def _parse_actual_time(stderr: str, requested: float) -> float | None:
     times = [float(m.group("t")) for m in SHOWINFO_PTS.finditer(stderr or "")]
     times = [t for t in times if t >= 0]
     if not times:
-        return requested
-    # First decoded/selected frame after the select filter.
+        return None
     return times[0]
 
 
@@ -102,24 +119,25 @@ def capture_frame(
 ) -> tuple[float, list[str]]:
     dest.parent.mkdir(parents=True, exist_ok=True)
     notes: list[str] = []
-    seek_at = clamp_time(requested, 0.0, last_safe_time(info))
+    end_cap = last_safe_time(info)
+    seek_at = clamp_time(requested, 0.0, end_cap)
     if abs(seek_at - requested) > 0.001:
         notes.append(
-            f"clamped requested {requested:.3f}s to {seek_at:.3f}s to stay inside the last decodable frame"
+            f"clamped requested {requested:.3f}s to {seek_at:.3f}s to stay inside the last video frame"
         )
 
-    actual, ok = _try_select_capture(info, seek_at, dest, max_width)
+    actual, ok = _try_bounded_capture(info, seek_at, dest, max_width)
     if not ok:
-        notes.append("select-filter capture produced no frame; used -ss fallback")
-        actual, ok = _try_ss_capture(info, seek_at, dest)
-    if not ok:
-        earlier = max(0.0, last_safe_time(info) - 0.2)
-        notes.append(f"retrying capture at {earlier:.3f}s")
-        actual, ok = _try_select_capture(info, earlier, dest, max_width)
-        if not ok:
-            actual, ok = _try_ss_capture(info, earlier, dest)
+        notes.append("bounded seek produced no frame; decoding from the last known video end")
+        actual, ok = _try_bounded_capture(info, end_cap, dest, max_width)
     if not ok or not dest.exists():
         raise RuntimeError(f"Could not capture a frame at {requested:.3f}s from {info.resolved_path}")
+    if actual is None:
+        notes.append(
+            f"ffmpeg did not report a presentation timestamp; not labeling requested {seek_at:.3f}s as observed"
+        )
+        actual = seek_at
+        notes.append("actual_time falls back to the clamped request because PTS was unavailable")
     if abs(actual - requested) > 0.25:
         notes.append(f"actual capture time {actual:.3f}s differs from requested {requested:.3f}s")
     if dest.exists() and max_width:
@@ -135,17 +153,21 @@ def _scale_filter(info: VideoInfo, max_width: int) -> str | None:
     return None
 
 
-def _try_select_capture(
+def _try_bounded_capture(
     info: VideoInfo, seek_at: float, dest: Path, max_width: int
-) -> tuple[float, bool]:
+) -> tuple[float | None, bool]:
+    """Seek near the target, then decode forward. Does not restart from t=0 unless the target is near 0."""
+    preroll = min(seek_at, 3.0)
+    ss = max(0.0, seek_at - preroll)
     vf_parts = [f"select=gte(t\\,{seek_at:.3f})", "showinfo"]
     scale = _scale_filter(info, max_width)
     if scale:
         vf_parts.append(scale)
-    result = ffcmd.run(
+    args = ["ffmpeg", "-y"]
+    if ss > 0.001:
+        args.extend(["-ss", f"{ss:.3f}"])
+    args.extend(
         [
-            "ffmpeg",
-            "-y",
             "-i",
             info.resolved_path,
             "-an",
@@ -158,40 +180,142 @@ def _try_select_capture(
             "-q:v",
             "2",
             str(dest),
-        ],
-        check=False,
+        ]
     )
+    result = ffcmd.run(args, check=False)
     if result.returncode != 0 or not dest.exists() or dest.stat().st_size < 32:
         if dest.exists():
             dest.unlink(missing_ok=True)
-        return seek_at, False
+        return None, False
     return _parse_actual_time(result.stderr, seek_at), True
 
 
-def _try_ss_capture(info: VideoInfo, seek_at: float, dest: Path) -> tuple[float, bool]:
-    result = ffcmd.run(
+def _try_select_capture(
+    info: VideoInfo, seek_at: float, dest: Path, max_width: int
+) -> tuple[float | None, bool]:
+    return _try_bounded_capture(info, seek_at, dest, max_width)
+
+
+class _JpegPipe:
+    def __init__(self, stream):
+        self.stream = stream
+        self.buf = b""
+
+    def read_one(self) -> bytes | None:
+        while True:
+            start = self.buf.find(JPEG_SOI)
+            if start >= 0:
+                end = self.buf.find(JPEG_EOI, start + 2)
+                if end >= 0:
+                    jpeg = self.buf[start : end + 2]
+                    self.buf = self.buf[end + 2 :]
+                    return jpeg
+                if start > 0:
+                    self.buf = self.buf[start:]
+            chunk = self.stream.read(65536)
+            if not chunk:
+                return None
+            self.buf += chunk
+
+
+def _select_expr(timestamps: list[float]) -> str:
+    parts = []
+    for index, t in enumerate(timestamps):
+        parts.append(f"gte(t\\,{t:.3f})*eq(selected_n\\,{index})")
+    return "+".join(parts)
+
+
+def iter_decoded_frames(
+    info: VideoInfo,
+    max_width: int,
+    timestamps: list[float] | None = None,
+    start_s: float | None = None,
+) -> Iterator[tuple[float, bytes]]:
+    """One decode pass. If timestamps are given, only those frames are encoded.
+
+    start_s, when set, is an input seek. -copyts keeps presentation timestamps
+    on the original recording timeline.
+    """
+    vf_parts: list[str] = []
+    if timestamps:
+        vf_parts.append(f"select={_select_expr(timestamps)}")
+    vf_parts.append("showinfo")
+    scale = _scale_filter(info, max_width)
+    if scale:
+        vf_parts.append(scale)
+    args = [
+        "ffmpeg",
+        "-hide_banner",
+        "-nostdin",
+    ]
+    if start_s is not None and start_s > 0:
+        args.extend(["-ss", f"{start_s:.3f}", "-copyts"])
+    args.extend(
         [
-            "ffmpeg",
-            "-y",
-            "-ss",
-            f"{seek_at:.3f}",
             "-i",
             info.resolved_path,
-            "-frames:v",
-            "1",
-            "-update",
-            "1",
+            "-an",
+            "-vsync",
+            "0",
+            "-vf",
+            ",".join(vf_parts),
+        ]
+    )
+    if timestamps:
+        args.extend(["-frames:v", str(len(timestamps))])
+    args.extend(
+        [
+            "-f",
+            "image2pipe",
+            "-vcodec",
+            "mjpeg",
             "-q:v",
             "2",
-            str(dest),
-        ],
-        check=False,
+            "pipe:1",
+        ]
     )
-    if result.returncode != 0 or not dest.exists() or dest.stat().st_size < 32:
-        if dest.exists():
-            dest.unlink(missing_ok=True)
-        return seek_at, False
-    return seek_at, True
+    proc = ffcmd.popen(args)
+    pts_q: queue.Queue[float | object] = queue.Queue()
+    sentinel = object()
+
+    def read_stderr() -> None:
+        assert proc.stderr is not None
+        leftover = ""
+        while True:
+            chunk = proc.stderr.read(4096)
+            if not chunk:
+                break
+            leftover += chunk.decode("utf-8", "replace")
+            while "\n" in leftover:
+                line, leftover = leftover.split("\n", 1)
+                match = SHOWINFO_PTS.search(line)
+                if match:
+                    t = float(match.group("t"))
+                    if t >= 0:
+                        pts_q.put(t)
+        pts_q.put(sentinel)
+
+    thread = threading.Thread(target=read_stderr, daemon=True, name="ffmpeg-showinfo")
+    thread.start()
+    try:
+        assert proc.stdout is not None
+        reader = _JpegPipe(proc.stdout)
+        while True:
+            jpeg = reader.read_one()
+            if jpeg is None:
+                break
+            pts = pts_q.get(timeout=120)
+            if pts is sentinel:
+                break
+            yield float(pts), jpeg
+    finally:
+        if proc.poll() is None:
+            proc.kill()
+        try:
+            proc.wait(timeout=8)
+        except Exception:
+            pass
+        thread.join(timeout=8)
 
 
 def _ensure_max_width(path: Path, max_width: int) -> None:
@@ -299,36 +423,164 @@ def capture_candidates(
     candidates: list[CaptureCandidate],
     existing: dict[str, ScreenshotRecord] | None = None,
     progress: ProgressCb | None = None,
+    frame_source: Callable[[VideoInfo, int], Iterable[tuple[float, bytes]]] | None = None,
 ) -> list[ScreenshotRecord]:
     existing = existing or {}
-    records: list[ScreenshotRecord] = []
-    for index, cand in enumerate(candidates, start=1):
-        frame_id = f"frame_{index:04d}"
-        # Reuse by requested ms if a previous capture exists on disk.
+    job_frames.mkdir(parents=True, exist_ok=True)
+    records: list[ScreenshotRecord | None] = [None] * len(candidates)
+    pending: list[int] = []
+    source = frame_source or iter_decoded_frames
+
+    for index, cand in enumerate(candidates):
         reuse_key = f"{cand.reason}:{cand.requested_time:.3f}"
         prior = existing.get(reuse_key)
+        frame_id = f"frame_{index + 1:04d}"
         filename = f"{frame_id}_t{format_filename_time(cand.requested_time)}.jpg"
         dest = job_frames / filename
-        if progress and (index == 1 or index % 10 == 0 or index == len(candidates)):
-            progress("frames", f"Capturing {index}/{len(candidates)}: {format_timecode(cand.requested_time)}")
         if prior and (job_frames.parent / prior.relative_path).exists():
             src = job_frames.parent / prior.relative_path
             if src != dest:
                 dest.write_bytes(src.read_bytes())
-            actual = prior.actual_time
-            notes = list(prior.notes) + ["reused prior capture"]
-        else:
-            actual, notes = capture_frame(info, cand.requested_time, dest, max_width)
-        rel = dest.relative_to(job_frames.parent).as_posix()
-        records.append(
-            ScreenshotRecord(
+            rel = dest.relative_to(job_frames.parent).as_posix()
+            records[index] = ScreenshotRecord(
                 id=frame_id,
                 requested_time=cand.requested_time,
-                actual_time=actual,
+                actual_time=prior.actual_time,
                 scene_id=cand.scene_id,
                 relative_path=rel,
                 capture_reason=cand.reason,
-                notes=notes,
+                notes=list(prior.notes) + ["reused prior capture"],
             )
+        else:
+            pending.append(index)
+
+    if pending:
+        if progress:
+            progress("frames", f"Decoding video once for {len(pending)} screenshots")
+        _fill_from_sequential_decode(
+            info,
+            candidates,
+            pending,
+            records,
+            job_frames,
+            max_width,
+            source,
+            progress,
         )
-    return records
+
+    finished = [rec for rec in records if rec is not None]
+    if len(finished) != len(candidates):
+        missing = [i for i, rec in enumerate(records) if rec is None]
+        raise RuntimeError(
+            f"Could not capture {len(missing)} requested screenshot(s); decoded no usable video frame."
+        )
+    return finished
+
+
+def _fill_from_sequential_decode(
+    info: VideoInfo,
+    candidates: list[CaptureCandidate],
+    pending: list[int],
+    records: list[ScreenshotRecord | None],
+    job_frames: Path,
+    max_width: int,
+    source: Callable[[VideoInfo, int], Iterable[tuple[float, bytes]]],
+    progress: ProgressCb | None,
+) -> None:
+    pending_i = 0
+    last_jpeg: bytes | None = None
+    last_pts: float | None = None
+    decoded = 0
+    times = [candidates[i].requested_time for i in pending]
+    if source is iter_decoded_frames:
+        stream = iter_decoded_frames(info, max_width, times)
+    else:
+        stream = source(info, max_width)
+    for pts, jpeg in stream:
+        decoded += 1
+        last_jpeg, last_pts = jpeg, pts
+        while pending_i < len(pending) and pts + 1e-4 >= candidates[pending[pending_i]].requested_time:
+            idx = pending[pending_i]
+            _write_shot(
+                candidates[idx],
+                idx,
+                pts,
+                jpeg,
+                job_frames,
+                records,
+                notes=[],
+            )
+            if progress:
+                done = sum(1 for rec in records if rec is not None)
+                progress(
+                    "frames",
+                    f"Captured {done}/{len(candidates)} at {format_timecode(pts)}",
+                )
+            pending_i += 1
+        if pending_i >= len(pending):
+            break
+    if pending_i < len(pending) and source is iter_decoded_frames:
+        last_jpeg, last_pts, extra = _scan_true_last_frame(info, max_width, last_jpeg, last_pts)
+        decoded += extra
+        if extra and progress:
+            progress("frames", f"Last available video frame is {format_timecode(last_pts or 0.0)}")
+    while pending_i < len(pending):
+        if last_jpeg is None or last_pts is None:
+            break
+        idx = pending[pending_i]
+        cand = candidates[idx]
+        notes = [
+            f"requested {cand.requested_time:.3f}s is after the last available video frame at {last_pts:.3f}s; "
+            "used that last frame"
+        ]
+        _write_shot(cand, idx, last_pts, last_jpeg, job_frames, records, notes)
+        if progress:
+            done = sum(1 for rec in records if rec is not None)
+            progress("frames", f"Captured {done}/{len(candidates)} (last video frame)")
+        pending_i += 1
+    if decoded == 0 and pending:
+        raise RuntimeError(f"Could not decode any video frames from {info.resolved_path}")
+
+
+def _scan_true_last_frame(
+    info: VideoInfo,
+    max_width: int,
+    last_jpeg: bytes | None,
+    last_pts: float | None,
+) -> tuple[bytes | None, float | None, int]:
+    """Select-filter leftover is the last *selected* frame, not the file's last frame."""
+    start = 0.0 if last_pts is None else max(0.0, last_pts - 0.5)
+    extra = 0
+    for pts, jpeg in iter_decoded_frames(info, max_width, start_s=start):
+        extra += 1
+        if last_pts is None or pts + 1e-4 >= last_pts:
+            last_jpeg, last_pts = jpeg, pts
+    return last_jpeg, last_pts, extra
+
+
+def _write_shot(
+    cand: CaptureCandidate,
+    index: int,
+    actual: float,
+    jpeg: bytes,
+    job_frames: Path,
+    records: list[ScreenshotRecord | None],
+    notes: list[str],
+) -> None:
+    frame_id = f"frame_{index + 1:04d}"
+    dest = job_frames / f"{frame_id}_t{format_filename_time(cand.requested_time)}.jpg"
+    dest.write_bytes(jpeg)
+    if abs(actual - cand.requested_time) > 0.25:
+        notes = list(notes) + [
+            f"actual capture time {actual:.3f}s differs from requested {cand.requested_time:.3f}s"
+        ]
+    rel = dest.relative_to(job_frames.parent).as_posix()
+    records[index] = ScreenshotRecord(
+        id=frame_id,
+        requested_time=cand.requested_time,
+        actual_time=actual,
+        scene_id=cand.scene_id,
+        relative_path=rel,
+        capture_reason=cand.reason,
+        notes=notes,
+    )

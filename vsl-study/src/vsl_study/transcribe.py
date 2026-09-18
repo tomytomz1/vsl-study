@@ -5,6 +5,7 @@ from __future__ import annotations
 from typing import Any, Callable
 
 from vsl_study.models import ProcessSettings, TranscriptResult, TranscriptSegment
+from vsl_study.whisper_io import safe_tqdm, whisper_transcribe_verbose
 
 ENGLISH_ONLY_MODELS = {"tiny.en", "base.en", "small.en", "medium.en"}
 MULTILINGUAL_MODELS = {"tiny", "base", "small", "medium", "large", "large-v1", "large-v2", "large-v3", "turbo"}
@@ -111,13 +112,10 @@ def transcribe_wav(
         )
     import whisper
 
-    model = whisper.load_model(model_name, device=device)
-    if progress:
-        progress("transcribe", f"Transcribing with {model_name} ({device_note})")
     decode: dict[str, Any] = {
         "task": task,
         "fp16": use_fp16,
-        "verbose": False,
+        "verbose": whisper_transcribe_verbose(),
     }
     language_source = "configured"
     if language:
@@ -128,7 +126,11 @@ def transcribe_wav(
     else:
         language_source = "detected"
 
-    result = model.transcribe(wav_path, **decode)
+    with safe_tqdm(progress, "transcribe"):
+        model = whisper.load_model(model_name, device=device)
+        if progress:
+            progress("transcribe", f"Transcribing with {model_name} ({device_note})")
+        result = model.transcribe(wav_path, **decode)
     raw_segments = result.get("segments") or []
     segments: list[TranscriptSegment] = []
     for index, raw in enumerate(raw_segments, start=1):

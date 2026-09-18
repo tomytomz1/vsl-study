@@ -261,7 +261,7 @@ def _write_markdown(
         "# VSL Study report",
         "",
         f"- Source: `{info.resolved_path}`",
-        f"- Duration: {format_timecode(info.duration_s)} ({info.duration_s:.3f}s)",
+        f"- Duration: {format_timecode(info.duration_s)} ({info.duration_s:.3f}s container/audio)",
         f"- Dimensions: {info.width}x{info.height}",
         f"- Audio: {'yes' if info.has_audio else 'no'}",
         f"- Model: {transcript.model} / language: {transcript.language} / device: {transcript.device}",
@@ -270,8 +270,10 @@ def _write_markdown(
         "## Processing notes",
         "",
     ]
-    for note in info.notes:
-        lines.append(f"- {note}")
+    if info.video_duration_s:
+        lines.append(f"- Video stream duration: {info.video_duration_s:.3f}s (screenshots use this bound, not audio length)")
+    if not info.fps_trusted:
+        lines.append("- Container FPS metadata is not treated as a measured frame rate.")
     if transcript.status != "complete":
         lines.append(f"- Transcription {transcript.status}: {transcript.error}")
     if transcript.device_note:

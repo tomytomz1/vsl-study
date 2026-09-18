@@ -161,3 +161,123 @@ def test_offset_audio_fixture_inspectable(tmp_path: Path):
     assert info.has_audio
     # Offset is recorded so extraction can pad; exact container start times vary by muxer.
     assert info.audio_start_s is not None
+
+
+@requires_ffmpeg
+def test_report_and_zip_after_transcription_failure(tmp_path: Path, monkeypatch):
+    video = write_color_video(tmp_path / "talk.mp4", duration=2.0, audio=True)
+    from vsl_study import pipeline as pipeline_mod
+
+    def boom(wav_path, settings, progress=None):
+        raise RuntimeError("tqdm console exploded")
+
+    monkeypatch.setattr(pipeline_mod, "transcribe_wav", boom)
+    out = tmp_path / "failed-speech"
+    result = process_video(
+        video,
+        out,
+        settings=ProcessSettings(interval=1.0, detector="content", compact_view=False, ocr=False),
+    )
+    assert result["transcript_status"] == "failed"
+    html = (out / "report.html").read_text(encoding="utf-8")
+    md = (out / "report.md").read_text(encoding="utf-8")
+    assert "failed" in html.lower()
+    assert "tqdm console exploded" in html
+    assert "no speech detected" not in html.lower()
+    assert "Transcription failed" in md or "transcription failed" in md.lower()
+    assert (out / "vsl_study_evidence.zip").exists()
+    assert list((out / "frames").glob("*.jpg"))
+    job = json.loads((out / "job.json").read_text(encoding="utf-8"))
+    assert job["stages"]["transcribe"]["status"] == "failed"
+    assert job["stages"]["frames"]["status"] == "complete"
+    cache = json.loads((out / "cache" / "transcribe.json").read_text(encoding="utf-8"))
+    assert cache["status"] == "failed"
+    frames_cache = json.loads((out / "cache" / "frames.json").read_text(encoding="utf-8"))
+    assert frames_cache["scheduled"] == frames_cache["completed"]
+    assert frames_cache["status"] == "complete"
+
+
+@requires_ffmpeg
+def test_failed_transcription_is_retryable(tmp_path: Path, monkeypatch):
+    video = write_color_video(tmp_path / "retry.mp4", duration=1.5, audio=True)
+    from vsl_study import pipeline as pipeline_mod
+    from vsl_study.models import TranscriptResult, TranscriptSegment
+
+    calls = {"n": 0}
+
+    def flaky(wav_path, settings, progress=None):
+        calls["n"] += 1
+        if calls["n"] == 1:
+            raise RuntimeError("first attempt failed")
+        return TranscriptResult(
+            status="complete",
+            model=settings.model,
+            language="en",
+            language_source="configured",
+            device="cpu",
+            device_note="test",
+            segments=[TranscriptSegment(id="seg_0001", start=0.0, end=0.4, text="hello")],
+            text="hello",
+        )
+
+    monkeypatch.setattr(pipeline_mod, "transcribe_wav", flaky)
+    out = tmp_path / "retry-job"
+    first = process_video(
+        video,
+        out,
+        settings=ProcessSettings(interval=5.0, detector="content", compact_view=False, ocr=False),
+    )
+    assert first["transcript_status"] == "failed"
+    second = process_video(
+        video,
+        out,
+        settings=ProcessSettings(interval=5.0, detector="content", compact_view=False, ocr=False),
+    )
+    assert second["transcript_status"] == "complete"
+    payload = json.loads((out / "transcript.json").read_text(encoding="utf-8"))
+    assert payload["status"] == "complete"
+    assert payload["text"] == "hello"
+
+
+@requires_ffmpeg
+def test_frame_extraction_failure_is_terminal(tmp_path: Path, monkeypatch):
+    video = write_color_video(tmp_path / "broken-frames.mp4", duration=1.0, audio=False)
+    from vsl_study import pipeline as pipeline_mod
+    from vsl_study.pipeline import PipelineError
+
+    def fail_capture(*args, **kwargs):
+        raise RuntimeError("no pixels")
+
+    monkeypatch.setattr(pipeline_mod, "capture_candidates", fail_capture)
+    with pytest.raises(PipelineError, match="Screenshot extraction failed"):
+        process_video(
+            video,
+            tmp_path / "no-frames",
+            settings=ProcessSettings(interval=5.0, detector="content", compact_view=False, ocr=False),
+        )
+    job = json.loads((tmp_path / "no-frames" / "job.json").read_text(encoding="utf-8"))
+    assert job["stages"]["frames"]["status"] == "failed"
+    assert job["stages"]["frames"]["status"] != "running"
+
+
+@requires_ffmpeg
+def test_stale_frame_cache_is_not_reused_across_key_versions(tmp_path: Path):
+    video = write_color_video(tmp_path / "solid.mp4", duration=1.5, fps=15)
+    out = tmp_path / "job"
+    settings = ProcessSettings(interval=0.7, detector="content", compact_view=False, ocr=False)
+    process_video(video, out, settings=settings)
+    frames_path = out / "cache" / "frames.json"
+    payload = json.loads(frames_path.read_text(encoding="utf-8"))
+    for shot in payload["screenshots"]:
+        shot["notes"] = ["poisoned prior capture"]
+        shot["actual_time"] = 0.0
+    payload["cache_key"] = payload["cache_key"] + "|stale-version"
+    frames_path.write_text(json.dumps(payload), encoding="utf-8")
+    process_video(video, out, settings=settings)
+    refreshed = json.loads(frames_path.read_text(encoding="utf-8"))
+    assert "|stale-version" not in refreshed["cache_key"]
+    assert refreshed["screenshots"]
+    assert all("poisoned prior capture" not in (shot.get("notes") or []) for shot in refreshed["screenshots"])
+    later = [shot for shot in refreshed["screenshots"] if shot["requested_time"] > 0.2]
+    assert later
+    assert any(shot["actual_time"] > 0.15 for shot in later)

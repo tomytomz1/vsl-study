@@ -46,13 +46,13 @@ class ProcessSettings:
         return f"{fingerprint}|{self.model}|{self.language}|{self.task}"
 
     def scenes_key(self, fingerprint: str) -> str:
-        return f"{fingerprint}|{self.detector}"
+        return f"{fingerprint}|{self.detector}|seconds-1"
 
     def frames_key(self, fingerprint: str, extra_times: list[float]) -> str:
         extras = ",".join(f"{t:.3f}" for t in extra_times)
         return (
             f"{fingerprint}|{self.detector}|{self.interval:.3f}|"
-            f"{self.scene_start_offset:.3f}|{self.max_width}|{extras}"
+            f"{self.scene_start_offset:.3f}|{self.max_width}|{extras}|seq-pts-3"
         )
 
 
@@ -79,6 +79,8 @@ class VideoInfo:
     format_name: str
     audio_codec: str | None
     video_codec: str | None
+    video_duration_s: float | None = None
+    fps_trusted: bool = True
     notes: list[str] = field(default_factory=list)
     probe: dict[str, Any] = field(default_factory=dict)
 
