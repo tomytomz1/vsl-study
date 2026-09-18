@@ -8,53 +8,57 @@
 </head>
 <body>
   <main>
-    <h1>Record a browser tab</h1>
-    <p class="lede">This page stays on your computer. Capture takes real playback time. Keep this computer awake, and keep VSL Study open.</p>
-    <p class="warn">This app cannot press play or notice when a video on another site ends. You stop it. A time limit, if you set one, is only a clock — not detected completion.</p>
+    <header>
+      <p class="eyebrow">VSL STUDY</p>
+      <h1>Record a browser tab</h1>
+      <p class="lede">Capture a video, then turn it into a transcript and screenshots.</p>
+    </header>
 
-    <ol class="steps">
-      <li>Open the page</li>
-      <li>Select the tab with audio</li>
-      <li>Start and play</li>
-      <li>Stop and process</li>
-      <li>Open the evidence in VSL Study</li>
-    </ol>
-
-    <label>Page address (optional)
-      <input id="url" type="url" placeholder="https://">
-    </label>
-    <label>Recording title (optional)
-      <input id="title" type="text" maxlength="200" placeholder="Short name for this recording">
-    </label>
-    <label>Stop after this many minutes (optional time limit)
-      <input id="limit" type="number" min="1" max="180" step="1" placeholder="Leave blank">
-    </label>
-    <p class="hint">The address is a note you typed, not proof that the selected tab was that page. Do not put passwords in it.</p>
-
-    <div class="row">
-      <button type="button" id="open-page" class="ghost">Open page</button>
+    <section class="card" aria-labelledby="choose-heading">
+      <h2 id="choose-heading"><span class="step">1</span> Choose your video tab</h2>
+      <p>Open your video in another tab. Select it below and enable <strong>tab audio</strong>.</p>
       <button type="button" id="choose">Choose tab and audio</button>
-    </div>
+    </section>
 
-    <p class="instruct">Prepare the player at the beginning and make the video large enough to read. In the browser picker, choose that <strong>tab</strong> and turn on sharing the tab’s sound. Do not share the whole screen if you can choose a tab. You can play a moment to confirm sound, then go back to the start if the player allows it.</p>
-
-    <div class="preview-wrap">
-      <video id="preview" muted playsinline></video>
-      <div class="meters">
-        <div><span id="track-state">No audio track yet</span></div>
-        <div class="bar"><span id="level"></span></div>
-        <div><span id="signal-state">No audible signal detected</span></div>
+    <section class="card" aria-labelledby="sound-heading">
+      <h2 id="sound-heading"><span class="step">2</span> Check the picture and sound</h2>
+      <p>Play a few seconds to check the meter, then return the video to the beginning.</p>
+      <div class="preview-wrap">
+        <video id="preview" muted playsinline aria-label="Selected tab preview"></video>
+        <div class="meters">
+          <span id="track-state">No audio track yet</span>
+          <div class="bar" aria-hidden="true"><span id="level"></span></div>
+          <span id="signal-state">No audible signal detected</span>
+        </div>
       </div>
-    </div>
+      <p class="hint">The preview is muted to prevent an echo.</p>
+    </section>
 
-    <div class="row">
-      <button type="button" id="start" disabled>Start recording</button>
-      <button type="button" id="stop" class="primary" disabled>Stop and process</button>
-      <button type="button" id="cancel" class="ghost">Cancel recording</button>
-    </div>
-    <p id="clock">Not recording</p>
-    <p id="save-state">Nothing saved yet.</p>
-    <p id="status" role="status"></p>
+    <details class="options">
+      <summary>Optional settings</summary>
+      <label for="title">Recording title</label>
+      <input id="title" type="text" maxlength="200" placeholder="e.g. Yu Sleep">
+      <label for="limit">Stop after (minutes)</label>
+      <input id="limit" type="number" min="1" max="180" step="1" placeholder="Leave blank to stop manually" aria-describedby="limit-hint">
+      <p id="limit-hint" class="hint">A timer stops at the time you set, even if the video is still playing.</p>
+      <label for="url">Video page address</label>
+      <input id="url" type="url" placeholder="https://" aria-describedby="url-hint">
+      <p id="url-hint" class="hint">Save a link for reference or open it in another tab. You still choose the tab above.</p>
+      <button type="button" id="open-page" class="ghost">Open page</button>
+    </details>
+
+    <section class="record-controls" aria-labelledby="record-heading">
+      <h2 id="record-heading"><span class="step">3</span> Record</h2>
+      <p>Start recording, then play your video. When it ends, choose Stop and process.</p>
+      <div class="row">
+        <button type="button" id="start" disabled>Start recording</button>
+        <button type="button" id="stop" class="primary" disabled>Stop and process</button>
+        <button type="button" id="cancel" class="ghost">Cancel recording</button>
+      </div>
+      <div class="record-state"><p id="clock">Not recording</p><p id="save-state">Nothing saved yet.</p></div>
+      <p id="status" role="status" aria-live="polite"></p>
+    </section>
+    <footer>Keep VSL Study open and your computer awake. Recording takes the video's full playback time and does not stop automatically when it ends. Find your transcript and screenshots in the desktop app.</footer>
   </main>
   <script src="/recorder-core.js"></script>
   <script src="/recorder.js"></script>
