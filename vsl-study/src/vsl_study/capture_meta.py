@@ -273,9 +273,9 @@ def public_capture_record(raw: Any) -> dict[str, Any] | None:
         audio_track = _optional_json_bool(raw, "audio_track")
         audio_detected = _optional_json_bool(raw, "audio_detected")
         complete = _optional_json_bool(raw, "complete")
-    except ValueError:
+        url = sanitize_source_url(str(raw.get("source_url_user_supplied") or raw.get("source_url") or ""))
+    except (ValueError, OverflowError):
         return None
-    url = sanitize_source_url(str(raw.get("source_url_user_supplied") or raw.get("source_url") or ""))
     timeline = raw.get("timeline_note")
     if not isinstance(timeline, str) or not timeline.strip():
         timeline = STANDARD_TIMELINE_NOTE
@@ -388,11 +388,10 @@ def write_portable_capture(job_root: str | Path, capture: dict[str, Any]) -> Pat
 
 
 def clear_portable_capture(job_root: str | Path) -> None:
+    """Remove rejected provenance; other failures must block a new export."""
     dest = Path(job_root) / "capture-session" / "capture.json"
     try:
         dest.unlink()
     except FileNotFoundError:
-        return
-    except OSError:
         return
 

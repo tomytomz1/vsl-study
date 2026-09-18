@@ -131,10 +131,22 @@ def process_video(
         raise
     capture = payload.get("capture")
     settings = replace(settings, capture=capture)
-    if capture:
-        write_portable_capture(job.root, capture)
-    else:
-        clear_portable_capture(job.root)
+    export_key = f"{info.fingerprint}|reports|{settings.interval:.3f}|ocr={settings.ocr}|media={int(settings.include_media)}"
+    try:
+        if capture:
+            write_portable_capture(job.root, capture)
+        else:
+            clear_portable_capture(job.root)
+    except OSError as exc:
+        job.write_stage(
+            "export",
+            export_key,
+            "failed",
+            {"error": str(exc), "traceback": traceback.format_exc()},
+        )
+        raise PipelineError(
+            f"Could not update capture metadata; no new evidence ZIP was published: {exc}"
+        ) from exc
 
     inspect_key = f"{info.fingerprint}|{INSPECT_CACHE_VERSION}"
     cached_inspect = job.read_complete_stage("inspect", inspect_key)
@@ -230,7 +242,6 @@ def process_video(
     if capture:
         manifest["capture"] = capture
     packaged_media = None
-    export_key = f"{info.fingerprint}|reports|{settings.interval:.3f}|ocr={settings.ocr}|media={int(settings.include_media)}"
     if settings.include_media:
         _progress(progress, "export", "Copying the source recording into the evidence package")
         try:
