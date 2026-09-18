@@ -14,11 +14,12 @@ This folder is the **successful** reprocess of the same local recording that pro
 - Model `small.en`, language `en`, device auto → CPU fp32
 - Detector `adaptive`, interval 5s, scene-start offset 0.25s, max width 1280
 - OCR off, compact view on
-- Capture provenance copied from the original `capture.json`
+- Capture provenance: `capture-session/capture.json` and `capture-session/meta.json` copied from `%LOCALAPPDATA%\VSL Study\captures\010fac1ba67146b7a8f7c8e615dd9ca2\` after this job finished. `meta.json` still records a later `app_closed` cancel on the capture record; the recording itself is complete.
 
 ## Result
 
 - Transcript status: `complete` (real speech, not “no speech detected”)
+- Transcript files: `transcript.txt`, `transcript.json`, `transcript_timestamped.txt`, and `transcript.srt` (force-added; `*.srt` is otherwise gitignored)
 - Screenshots: 80 scheduled, 80 completed
 - Scenes: 55, ordered seconds, empty frame-index columns (1000 FPS metadata is untrusted)
 - Final image: requested 119.377s, actual PTS **119.376s**, with an explicit last-frame fallback note

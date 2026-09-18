@@ -1,0 +1,23 @@
+{
+  "input_type": "browser_tab_recording",
+  "recording_id": "010fac1ba67146b7a8f7c8e615dd9ca2",
+  "source_url_user_supplied": "https://theenergyrevolution.net/index-ers-auto-lead-39-promise-epp-lead-6-v3-u7-u10.php",
+  "title": "My first test ever",
+  "started_at": "2026-09-18T03:08:57Z",
+  "ended_at": "2026-09-18T03:11:01Z",
+  "media_duration_s": 120.062,
+  "browser": {
+    "userAgent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/152.0.0.0 Safari/537.36",
+    "vendor": "Google Inc."
+  },
+  "mime_type": "video/webm;codecs=vp9,opus",
+  "audio_track": true,
+  "audio_detected": true,
+  "stop_reason": "max_duration",
+  "complete": true,
+  "problems": [
+    "Container duration was missing; a copy remux restored seek metadata."
+  ],
+  "recording_path": "C:\\Users\\Tomas\\AppData\\Local\\VSL Study\\captures\\010fac1ba67146b7a8f7c8e615dd9ca2\\recording.fixed.webm",
+  "timeline_note": "Timestamps are relative to this recording, not verified times in the original video. Pauses, buffering, lead-in, and seeking can make the two timelines differ. The URL is what the user typed; it is not proof that the selected tab matched."
+}
