@@ -106,6 +106,17 @@
     stream.getTracks().forEach((t) => t.stop());
   }
 
+  function abandonChooseStream(stream) {
+    stopTracks(stream);
+    if (state.stream === stream) {
+      state.stream = null;
+    }
+    const preview = $("preview");
+    if (preview && preview.srcObject === stream) {
+      preview.srcObject = null;
+    }
+  }
+
   function releasePreview() {
     stopTracks(state.stream);
     state.stream = null;
@@ -207,11 +218,14 @@
     tick();
   }
 
+  let chooseOp = 0;
+
   $("choose").onclick = async () => {
     if (!page.canMutate()) {
       page.markEnded();
       return;
     }
+    const op = ++chooseOp;
     status("");
     if (!window.isSecureContext) {
       status("Capture needs a secure local page. This should be http://127.0.0.1 from VSL Study.");
@@ -234,14 +248,23 @@
     try {
       stream = await navigator.mediaDevices.getDisplayMedia(opts);
     } catch (err) {
+      if (page.ended || op !== chooseOp) return;
       status("Tab sharing was cancelled. Nothing was recorded. Choose the tab again when you are ready.");
       $("start").disabled = true;
+      return;
+    }
+    if (!page.canMutate() || op !== chooseOp) {
+      abandonChooseStream(stream);
       return;
     }
     state.stream = stream;
     $("preview").srcObject = stream;
     $("preview").muted = true;
     await $("preview").play().catch(() => {});
+    if (!page.canMutate() || op !== chooseOp) {
+      abandonChooseStream(stream);
+      return;
+    }
     const audioTracks = stream.getAudioTracks();
     state.audioTrack = audioTracks.length > 0;
     $("track-state").textContent = state.audioTrack
