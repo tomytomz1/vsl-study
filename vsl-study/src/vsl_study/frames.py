@@ -329,6 +329,7 @@ class FrameDecoder:
         self._err_thread.start()
 
     def request_stop(self) -> None:
+        """Caller cancelled decoding on purpose (generator close / job cancel)."""
         self._intentional_stop = True
         self._kill()
 
@@ -343,7 +344,7 @@ class FrameDecoder:
             yield pts, jpeg
 
     def finish(self) -> None:
-        """Wait for ffmpeg after stdout ended or requested frames were yielded."""
+        """Wait for ffmpeg after stdout ended. Requested JPEGs are not proof of success."""
         self._join_io()
         rc = self._wait_proc()
         if self._thread_error is not None:
@@ -354,15 +355,6 @@ class FrameDecoder:
             return
         if rc not in (0, None):
             raise self._error("ffmpeg decoder failed")
-
-    def stop_if_still_running(self, timeout: float = 3.0) -> None:
-        """After the requested frames, let -frames:v exit 0; only then treat a hang as our stop."""
-        try:
-            self._proc.wait(timeout=timeout)
-        except Exception:
-            pass
-        if self._proc.poll() is None:
-            self.request_stop()
 
     def close(self) -> None:
         if self._closed:
@@ -377,7 +369,7 @@ class FrameDecoder:
         try:
             item = self._jpeg_q.get(timeout=IO_TIMEOUT_S)
         except queue.Empty as exc:
-            self.request_stop()
+            self._kill()
             raise self._error("timed out waiting for decoded JPEG data") from exc
         if isinstance(item, BaseException):
             self._thread_error = item
@@ -390,7 +382,7 @@ class FrameDecoder:
         try:
             item = self._pts_q.get(timeout=IO_TIMEOUT_S)
         except queue.Empty as exc:
-            self.request_stop()
+            self._kill()
             raise self._error("timed out waiting for a presentation timestamp") from exc
         if isinstance(item, BaseException):
             self._thread_error = item
@@ -499,20 +491,14 @@ def iter_decoded_frames(
             filter_script=script,
         )
         decoder = FrameDecoder(args)
-        expected = len(timestamps) if timestamps else None
-        yielded = 0
         try:
             for pts, jpeg in decoder.frames():
                 yield pts, jpeg
-                yielded += 1
-                if expected is not None and yielded >= expected:
-                    decoder.stop_if_still_running()
-                    break
+            decoder.finish()
         except GeneratorExit:
             if decoder is not None:
                 decoder.request_stop()
             raise
-        decoder.finish()
     finally:
         if decoder is not None:
             decoder.close()
@@ -722,8 +708,9 @@ def _fill_from_sequential_decode(
                         f"Captured {done}/{len(candidates)} at {format_timecode(pts)}",
                     )
                 pending_i += 1
-            if pending_i >= len(pending):
-                break
+            # Do not stop consuming here. Filling every screenshot is not
+            # proof that ffmpeg completed; iter_decoded_frames() validates
+            # the exit status only after this generator is exhausted.
     except DecodeError:
         raise
     if pending_i < len(pending) and source is iter_decoded_frames:

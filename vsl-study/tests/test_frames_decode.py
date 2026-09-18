@@ -212,6 +212,68 @@ def test_stalled_decoder_times_out(tmp_path: Path, monkeypatch):
         list(iter_decoded_frames(_info(tmp_path / "n.mp4"), 320, timestamps=[0.0]))
 
 
+def test_timeout_is_decoder_failure_not_cancellation(tmp_path: Path, monkeypatch):
+    monkeypatch.setattr("vsl_study.frames.IO_TIMEOUT_S", 0.2)
+    monkeypatch.setattr("vsl_study.frames.ffcmd.popen", lambda args, **kwargs: BlockingPopen())
+    dest = tmp_path / "frames"
+    with pytest.raises(DecodeError, match="timed out"):
+        capture_candidates(
+            _info(tmp_path / "n.mp4"),
+            [],
+            dest,
+            320,
+            [CaptureCandidate(0.0, "interval", None)],
+        )
+    assert list(dest.glob("*.jpg")) == []
+
+
+def test_all_requested_frames_then_nonzero_exit_is_decoder_failure(tmp_path: Path, monkeypatch):
+    jpeg = _jpeg_bytes()
+    stderr = (
+        b"[Parsed_showinfo_0 @ 0] n:0 pts:0 pts_time:0.000 pos:0\n"
+        b"Error while decoding stream #0:0: Invalid data found\n"
+    )
+    _install_script(
+        monkeypatch,
+        [{"stdout": jpeg, "stderr": stderr, "returncode": 23}],
+    )
+    dest = tmp_path / "frames"
+    with pytest.raises(DecodeError, match="ffmpeg exit 23") as caught:
+        capture_candidates(
+            _info(tmp_path / "clip.mp4", duration_s=1.0, video_duration_s=1.0),
+            [],
+            dest,
+            320,
+            [CaptureCandidate(0.0, "interval", None)],
+        )
+    assert "Invalid data" in str(caught.value)
+    saved = list(dest.glob("*.jpg"))
+    assert saved
+    assert any("t00-00-00" in path.name for path in saved)
+    assert all("last available" not in path.name for path in saved)
+
+
+def test_explicit_generator_close_is_cancellation(tmp_path: Path, monkeypatch):
+    jpeg = _jpeg_bytes()
+    extra = _jpeg_bytes((9, 9, 9))
+    stderr = (
+        b"[Parsed_showinfo_0 @ 0] n:0 pts:0 pts_time:0.000 pos:0\n"
+        b"[Parsed_showinfo_0 @ 0] n:1 pts:1 pts_time:0.400 pos:0\n"
+    )
+    _install_script(
+        monkeypatch,
+        [{"stdout": jpeg + extra, "stderr": stderr, "returncode": 1}],
+    )
+    gen = iter_decoded_frames(
+        _info(tmp_path / "n.mp4", duration_s=1.0, video_duration_s=1.0),
+        320,
+        timestamps=[0.0, 0.4],
+    )
+    first = next(gen)
+    assert first[0] == pytest.approx(0.0)
+    gen.close()
+
+
 @requires_ffmpeg
 def test_successful_eof_with_audio_outlasting_video(tmp_path: Path):
     video = write_audio_longer_than_video(tmp_path / "tail.mkv")
@@ -272,3 +334,35 @@ def test_pipeline_marks_frames_failed_when_decoder_exits_nonzero(tmp_path: Path,
     assert cache["status"] == "failed"
     assert "ffmpeg exit 23" in cache["error"] or "decoder failed" in cache["error"]
     assert cache["completed"] == len(list((out / "frames").glob("frame_*.jpg")))
+
+
+@requires_ffmpeg
+def test_pipeline_marks_frames_failed_after_all_jpegs_then_exit_23(tmp_path: Path, monkeypatch):
+    video = write_color_video(tmp_path / "clip.mp4", duration=1.0, audio=False)
+    jpeg = _jpeg_bytes()
+    stderr = (
+        b"[Parsed_showinfo_0 @ 0] n:0 pts:0 pts_time:0.000 pos:0\n"
+        b"[Parsed_showinfo_0 @ 0] n:1 pts:1 pts_time:0.250 pos:0\n"
+        b"[Parsed_showinfo_0 @ 0] n:2 pts:2 pts_time:1.000 pos:0\n"
+        b"Error while decoding stream #0:0: Invalid data found\n"
+    )
+    _install_script(
+        monkeypatch,
+        [{"stdout": jpeg * 3, "stderr": stderr, "returncode": 23}],
+    )
+    out = tmp_path / "job"
+    with pytest.raises(PipelineError, match="Screenshot extraction failed"):
+        process_video(
+            video,
+            out,
+            settings=ProcessSettings(interval=5.0, detector="content", compact_view=False, ocr=False),
+        )
+    job = __import__("json").loads((out / "job.json").read_text(encoding="utf-8"))
+    assert job["stages"]["frames"]["status"] == "failed"
+    cache = __import__("json").loads((out / "cache" / "frames.json").read_text(encoding="utf-8"))
+    assert cache["status"] == "failed"
+    assert "ffmpeg exit 23" in cache["error"] or "decoder failed" in cache["error"]
+    saved = list((out / "frames").glob("frame_*.jpg"))
+    assert saved
+    assert cache["completed"] == len(saved)
+    assert cache["completed"] >= 1
