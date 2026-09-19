@@ -30,6 +30,12 @@ PUBLIC_CAPTURE_FIELDS = (
     "problems",
     "recording_path",
     "timeline_note",
+    "capture_profile",
+    "capture_requested",
+    "capture_observed",
+    "capture_matches_profile",
+    "capture_constraint_error",
+    "capture_constraint_applied",
 )
 RECORDING_FILENAMES = {
     "recording.webm",
@@ -94,6 +100,12 @@ def build_capture_record(
     browser: dict[str, Any] | None = None,
     problems: list[str] | None = None,
     recording_path: str = "",
+    capture_profile: str = "",
+    capture_requested: dict[str, Any] | None = None,
+    capture_observed: dict[str, Any] | None = None,
+    capture_matches_profile: bool | None = None,
+    capture_constraint_error: str = "",
+    capture_constraint_applied: bool | None = None,
 ) -> dict[str, Any]:
     return {
         "input_type": "browser_tab_recording",
@@ -112,6 +124,12 @@ def build_capture_record(
         "problems": list(problems or []),
         "recording_path": recording_path,
         "timeline_note": STANDARD_TIMELINE_NOTE,
+        "capture_profile": (capture_profile or "").strip(),
+        "capture_requested": dict(capture_requested or {}),
+        "capture_observed": dict(capture_observed or {}),
+        "capture_matches_profile": capture_matches_profile,
+        "capture_constraint_error": (capture_constraint_error or "").strip()[:500],
+        "capture_constraint_applied": capture_constraint_applied,
     }
 
 
@@ -218,6 +236,23 @@ def _optional_json_bool(raw: dict[str, Any], key: str) -> bool | None:
     raise ValueError(f"{key} must be a JSON boolean")
 
 
+def _optional_settings_dict(value: Any) -> dict[str, Any]:
+    if value is None:
+        return {}
+    if not isinstance(value, dict):
+        return {}
+    cleaned: dict[str, Any] = {}
+    for key, item in list(value.items())[:24]:
+        name = str(key)[:64]
+        if isinstance(item, bool):
+            cleaned[name] = item
+        elif isinstance(item, (int, float)) and not isinstance(item, bool):
+            cleaned[name] = item
+        elif isinstance(item, str):
+            cleaned[name] = item[:200]
+    return cleaned
+
+
 def _optional_duration(value: Any) -> float | None:
     if value is None:
         return None
@@ -273,6 +308,8 @@ def public_capture_record(raw: Any) -> dict[str, Any] | None:
         audio_track = _optional_json_bool(raw, "audio_track")
         audio_detected = _optional_json_bool(raw, "audio_detected")
         complete = _optional_json_bool(raw, "complete")
+        capture_matches_profile = _optional_json_bool(raw, "capture_matches_profile")
+        capture_constraint_applied = _optional_json_bool(raw, "capture_constraint_applied")
         url = sanitize_source_url(str(raw.get("source_url_user_supplied") or raw.get("source_url") or ""))
     except (ValueError, OverflowError):
         return None
@@ -296,6 +333,12 @@ def public_capture_record(raw: Any) -> dict[str, Any] | None:
         "problems": problems,
         "recording_path": str(raw.get("recording_path") or ""),
         "timeline_note": timeline.strip(),
+        "capture_profile": str(raw.get("capture_profile") or ""),
+        "capture_requested": _optional_settings_dict(raw.get("capture_requested")),
+        "capture_observed": _optional_settings_dict(raw.get("capture_observed")),
+        "capture_matches_profile": capture_matches_profile,
+        "capture_constraint_error": str(raw.get("capture_constraint_error") or "")[:500],
+        "capture_constraint_applied": capture_constraint_applied,
     }
     return {key: record[key] for key in PUBLIC_CAPTURE_FIELDS}
 

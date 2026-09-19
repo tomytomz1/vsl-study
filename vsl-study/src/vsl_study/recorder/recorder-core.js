@@ -400,5 +400,113 @@
     return false;
   };
 
-  return { CapturePipeline: CapturePipeline, CaptureError: CaptureError, RecorderPage: RecorderPage, parsePageGeneration: parsePageGeneration };
+  var STUDY_CAPTURE_PROFILE = {
+    id: "study-1280-10",
+    targetWidth: 1280,
+    targetFrameRate: 10,
+    videoBitsPerSecond: 1200000,
+  };
+
+  function studyDisplayMediaOptions() {
+    return {
+      video: {
+        displaySurface: "browser",
+        width: { max: STUDY_CAPTURE_PROFILE.targetWidth, ideal: STUDY_CAPTURE_PROFILE.targetWidth },
+        frameRate: { max: STUDY_CAPTURE_PROFILE.targetFrameRate, ideal: STUDY_CAPTURE_PROFILE.targetFrameRate },
+      },
+      audio: { suppressLocalAudioPlayback: false },
+      preferCurrentTab: true,
+      selfBrowserSurface: "exclude",
+      surfaceSwitching: "exclude",
+      monitorTypeSurfaces: "exclude",
+    };
+  }
+
+  function studyTrackConstraints() {
+    return {
+      width: { max: STUDY_CAPTURE_PROFILE.targetWidth, ideal: STUDY_CAPTURE_PROFILE.targetWidth },
+      frameRate: { max: STUDY_CAPTURE_PROFILE.targetFrameRate, ideal: STUDY_CAPTURE_PROFILE.targetFrameRate },
+    };
+  }
+
+  function readTrackSettings(track) {
+    try {
+      return track && typeof track.getSettings === "function" ? track.getSettings() || {} : {};
+    } catch (err) {
+      return {};
+    }
+  }
+
+  function settingsMatchProfile(settings, profile) {
+    var width = Number(settings && settings.width);
+    var fps = Number(settings && settings.frameRate);
+    if (!Number.isFinite(width) || width > profile.targetWidth + 2) {
+      return false;
+    }
+    if (!Number.isFinite(fps) || fps > profile.targetFrameRate + 0.51) {
+      return false;
+    }
+    return true;
+  }
+
+  function applyStudyVideoConstraints(track, canMutate, profile) {
+    profile = profile || STUDY_CAPTURE_PROFILE;
+    var report = {
+      profileId: profile.id,
+      requested: {
+        width: profile.targetWidth,
+        frameRate: profile.targetFrameRate,
+        videoBitsPerSecond: profile.videoBitsPerSecond,
+      },
+      before: readTrackSettings(track),
+      after: null,
+      constraintApplied: false,
+      constraintError: null,
+      matchesProfile: false,
+      stale: false,
+    };
+    if (!track) {
+      report.constraintError = "No video track";
+      report.after = {};
+      return Promise.resolve(report);
+    }
+    if (typeof track.applyConstraints !== "function") {
+      report.constraintError = "applyConstraints is not supported";
+      report.after = report.before;
+      report.matchesProfile = settingsMatchProfile(report.after, profile);
+      return Promise.resolve(report);
+    }
+    return Promise.resolve()
+      .then(function () {
+        return track.applyConstraints(studyTrackConstraints());
+      })
+      .then(function () {
+        if (typeof canMutate === "function" && !canMutate()) {
+          report.stale = true;
+          report.after = readTrackSettings(track);
+          return report;
+        }
+        report.constraintApplied = true;
+        report.after = readTrackSettings(track);
+        report.matchesProfile = settingsMatchProfile(report.after, profile);
+        return report;
+      })
+      .catch(function (err) {
+        report.constraintError = String((err && (err.message || err.name)) || err);
+        report.after = readTrackSettings(track);
+        report.matchesProfile = settingsMatchProfile(report.after, profile);
+        return report;
+      });
+  }
+
+  return {
+    CapturePipeline: CapturePipeline,
+    CaptureError: CaptureError,
+    RecorderPage: RecorderPage,
+    parsePageGeneration: parsePageGeneration,
+    STUDY_CAPTURE_PROFILE: STUDY_CAPTURE_PROFILE,
+    studyDisplayMediaOptions: studyDisplayMediaOptions,
+    applyStudyVideoConstraints: applyStudyVideoConstraints,
+    settingsMatchProfile: settingsMatchProfile,
+  };
 });

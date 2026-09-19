@@ -120,20 +120,7 @@ class JobDir:
             "fingerprint": identity.fingerprint,
             "duration_s": identity.duration_s,
         }
-        payload["settings"] = {
-            "model": settings.model,
-            "language": settings.language,
-            "task": settings.task,
-            "detector": settings.detector,
-            "interval": settings.interval,
-            "scene_start_offset": settings.scene_start_offset,
-            "max_width": settings.max_width,
-            "ocr": settings.ocr,
-            "context_window_s": settings.context_window_s,
-            "compact_view": settings.compact_view,
-            "include_media": settings.include_media,
-            "device": settings.device,
-        }
+        payload["settings"] = settings.stored_dict()
         from vsl_study.capture_meta import capture_associates_with_video, public_capture_record
 
         incoming = public_capture_record(settings.capture) if settings.capture else None

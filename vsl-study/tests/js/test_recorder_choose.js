@@ -47,11 +47,36 @@ function jsonResponse(body, status) {
   };
 }
 
-function makeTrack(kind) {
+function makeTrack(kind, settings) {
   const listeners = {};
+  const current = Object.assign(
+    { width: 1280, height: 720, frameRate: 10, displaySurface: "browser" },
+    settings || {}
+  );
   return {
     kind,
     stopped: false,
+    lastConstraints: null,
+    constraintError: null,
+    applyConstraints(constraints) {
+      this.lastConstraints = constraints;
+      if (this.constraintError) {
+        return Promise.reject(this.constraintError);
+      }
+      if (constraints && constraints.width && constraints.width.ideal) {
+        current.width = Math.min(Number(current.width) || constraints.width.ideal, constraints.width.ideal);
+      }
+      if (constraints && constraints.frameRate && constraints.frameRate.ideal) {
+        current.frameRate = Math.min(
+          Number(current.frameRate) || constraints.frameRate.ideal,
+          constraints.frameRate.ideal
+        );
+      }
+      return Promise.resolve();
+    },
+    getSettings() {
+      return Object.assign({}, current);
+    },
     stop() {
       this.stopped = true;
     },
@@ -61,8 +86,8 @@ function makeTrack(kind) {
   };
 }
 
-function makeStream(hasAudio) {
-  const video = makeTrack("video");
+function makeStream(hasAudio, videoSettings) {
+  const video = makeTrack("video", videoSettings);
   const audio = hasAudio === false ? null : makeTrack("audio");
   const tracks = audio ? [video, audio] : [video];
   return {
@@ -153,8 +178,10 @@ function createHarness(options) {
     return Promise.resolve();
   };
 
-  function FakeMediaRecorder() {
+  function FakeMediaRecorder(stream, options) {
     mediaRecorders.push(this);
+    this.stream = stream;
+    this.options = options || {};
     this.state = "inactive";
     this.start = () => {
       this.state = "recording";
@@ -170,9 +197,9 @@ function createHarness(options) {
     userAgent: "vsl-test",
     vendor: "vsl-test",
     mediaDevices: {
-      getDisplayMedia() {
+      getDisplayMedia(constraints) {
         const pending = deferred();
-        displayMediaCalls.push(pending);
+        displayMediaCalls.push({ ...pending, constraints });
         return pending.promise;
       },
     },
@@ -465,6 +492,71 @@ test("a valid page can select a stream with audio, attach preview, and enable St
     assert.equal(harness.elements.status.textContent, PREVIEW_MESSAGE);
     assert.equal(harness.audioContexts.length, 1);
     assert.equal(harness.mediaRecorders.length, 0);
+    assert.equal(harness.unhandled.length, 0);
+  } finally {
+    harness.dispose();
+  }
+});
+
+test("getDisplayMedia requests study width and frame rate", async () => {
+  const harness = createHarness();
+  try {
+    await harness.ackHeartbeat();
+    const chooseDone = harness.clickChoose();
+    const video = harness.displayMediaCalls[0].constraints.video;
+    assert.equal(video.displaySurface, "browser");
+    assert.equal(video.width.ideal, 1280);
+    assert.equal(video.width.max, 1280);
+    assert.equal(video.frameRate.ideal, 10);
+    assert.equal(video.frameRate.max, 10);
+    harness.displayMediaCalls[0].resolve(makeStream(true));
+    await chooseDone;
+  } finally {
+    harness.dispose();
+  }
+});
+
+test("applyConstraints rejection is reported and not labeled as the study profile", async () => {
+  const harness = createHarness();
+  try {
+    await harness.ackHeartbeat();
+    const chooseDone = harness.clickChoose();
+    const stream = makeStream(true, { width: 3840, height: 1730, frameRate: 30 });
+    stream.getVideoTracks()[0].constraintError = Object.assign(new Error("OverconstrainedError"), {
+      name: "OverconstrainedError",
+    });
+    harness.displayMediaCalls[0].resolve(stream);
+    await chooseDone;
+    await harness.flush();
+    assert.equal(harness.elements.start.disabled, false);
+    assert.match(harness.elements.status.textContent, /not the study 1280px\/10fps profile/);
+    assert.equal(stream.getVideoTracks()[0].stopped, false);
+  } finally {
+    harness.dispose();
+  }
+});
+
+test("cancellation during applyConstraints stops the stream and keeps the ended page", async () => {
+  const harness = createHarness();
+  try {
+    const chooseDone = harness.clickChoose();
+    const stream = makeStream(true);
+    const video = stream.getVideoTracks()[0];
+    let release;
+    video.applyConstraints = () =>
+      new Promise((resolve) => {
+        release = resolve;
+      });
+    harness.displayMediaCalls[0].resolve(stream);
+    await harness.flush();
+    await harness.deliverStaleHeartbeat(ENDED_MESSAGE);
+    assertLockedEnded(harness, ENDED_MESSAGE);
+    release();
+    await chooseDone;
+    await harness.flush();
+    assertAllStopped(stream);
+    assert.equal(harness.elements.preview.srcObject, null);
+    assertLockedEnded(harness, ENDED_MESSAGE);
     assert.equal(harness.unhandled.length, 0);
   } finally {
     harness.dispose();

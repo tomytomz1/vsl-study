@@ -125,7 +125,12 @@ def main() -> None:
 
                 result = process_video(input_path.strip(), output_dir.strip(), settings=settings, progress=on_progress)
                 st.session_state.last_result = result
-                status_box.success(f"Done. Package: {result['job']}")
+                if result.get("package_status") == "failed":
+                    status_box.warning(
+                        f"Report is ready in {result['job']}. Packaging failed: {result.get('package_error') or 'ZIP incomplete'}."
+                    )
+                else:
+                    status_box.success(f"Done. Package: {result['job']}")
             except SettingsError as exc:
                 st.error(str(exc))
             except Exception as exc:  # noqa: BLE001

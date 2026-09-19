@@ -11,6 +11,7 @@ requires-python = ">=3.11,<3.12"
 authors = [{ name = "VSL Study" }]
 dependencies = [
   "openai-whisper==20250625",
+  "faster-whisper>=1.1.0,<2",
   "scenedetect==0.7.1",
   "opencv-python-headless>=4.9,<5",
   "streamlit==1.63.0",

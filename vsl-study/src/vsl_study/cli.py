@@ -23,9 +23,17 @@ def main(argv: list[str] | None = None) -> int:
     p_proc.add_argument("--language", default="en", help="Original language. Default transcribes; does not translate.")
     p_proc.add_argument("--task", default="transcribe", choices=["transcribe", "translate"])
     p_proc.add_argument("--detector", default="adaptive", choices=["adaptive", "content"])
-    p_proc.add_argument("--interval", type=float, default=5.0, help="Backup screenshot interval in seconds")
+    p_proc.add_argument("--interval", type=float, default=15.0, help="Backup screenshot interval in seconds (default: 15)")
     p_proc.add_argument("--scene-start-offset", type=float, default=0.25)
     p_proc.add_argument("--max-width", type=int, default=1280)
+    p_proc.add_argument("--max-auto-screenshots", type=int, default=600, help="Automatic screenshot cap. 0 means no cap.")
+    p_proc.add_argument("--ocr-budget", type=int, default=300, help="Automatic OCR cap. 0 means OCR every screenshot.")
+    p_proc.add_argument(
+        "--dense",
+        action="store_true",
+        help="Denser analysis: 5s interval, higher screenshot/OCR caps.",
+    )
+    p_proc.add_argument("--transcribe-backend", default="faster-whisper", choices=["faster-whisper", "openai-whisper"])
     p_proc.add_argument(
         "--ocr",
         action=argparse.BooleanOptionalAction,
@@ -91,12 +99,22 @@ def _cmd_process(args: argparse.Namespace) -> int:
         print(format_report(checks), end="")
         print("Required dependencies are missing. Fix them before process.", file=sys.stderr)
         return 1
+    if args.dense:
+        interval = args.interval if args.interval != 15.0 else 5.0
+        max_auto = args.max_auto_screenshots if args.max_auto_screenshots != 600 else 2000
+        ocr_budget = args.ocr_budget if args.ocr_budget != 300 else 800
+        policy = "dense-v1"
+    else:
+        interval = args.interval
+        max_auto = args.max_auto_screenshots
+        ocr_budget = args.ocr_budget
+        policy = "standard-v1"
     settings = ProcessSettings(
         model=args.model,
         language=args.language,
         task=args.task,
         detector=args.detector,
-        interval=args.interval,
+        interval=interval,
         scene_start_offset=args.scene_start_offset,
         max_width=args.max_width,
         ocr=args.ocr,
@@ -104,6 +122,11 @@ def _cmd_process(args: argparse.Namespace) -> int:
         compact_view=not args.no_compact,
         include_media=args.include_media,
         device=args.device,
+        sampling_policy=policy,
+        max_auto_screenshots=None if max_auto == 0 else int(max_auto),
+        ocr_budget=None if ocr_budget == 0 else int(ocr_budget),
+        transcribe_backend=args.transcribe_backend,
+        transcribe_compute_type="int8" if args.transcribe_backend == "faster-whisper" else "",
     )
     try:
         result = process_video(
@@ -117,11 +140,17 @@ def _cmd_process(args: argparse.Namespace) -> int:
         return 1
     print(f"job: {result['job']}")
     print(f"manifest: {result['manifest']}")
-    print(f"zip: {result['zip']}")
+    print(f"zip: {result.get('zip')}")
     print(f"transcript: {result['transcript_status']}")
+    print(f"package: {result.get('package_status', 'complete')}")
     print(f"scenes: {result['scene_count']}  screenshots: {result['screenshot_count']}")
     if result["transcript_status"] != "complete":
         print("Transcription was not complete. Visual outputs were still written.")
+    if result.get("package_status") == "failed":
+        err = result.get("package_error") or "Evidence ZIP is incomplete"
+        print(f"error: {err}", file=sys.stderr)
+        print("The report is available even though packaging failed.")
+        return 1
     return 0
 
 

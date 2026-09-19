@@ -7,6 +7,7 @@ Missing OCR must not block transcription or screenshots.
 
 from __future__ import annotations
 
+import hashlib
 import os
 import shutil
 from pathlib import Path
@@ -16,8 +17,11 @@ from vsl_study.cache import atomic_write_json, atomic_write_text
 from vsl_study.models import ScreenshotRecord
 from vsl_study.timeutil import format_timecode
 
-OCR_CACHE_VERSION = "v2"
+OCR_CACHE_VERSION = "v3-select"
 MIN_SCORE = 0.35
+EQUIV_MAX_DIFF = 18
+EQUIV_MEAN_DIFF = 2.0
+CHECKPOINT_EVERY = 10
 ProgressCb = Callable[[str, str], None]
 
 _rapid: Any = None
@@ -158,22 +162,10 @@ def _get_rapidocr() -> Any:
 
 
 def preprocess_for_ocr(image: Any) -> Any:
-    from PIL import Image, ImageFilter, ImageOps, ImageStat
+    """Standard path keeps native pixels. No unconditional 720px upscale."""
+    from PIL import ImageOps
 
-    rgb = image.convert("RGB")
-    width, height = rgb.size
-    shortest = min(width, height)
-    if shortest < 720:
-        scale = 720 / max(shortest, 1)
-        new_w = min(1920, int(round(width * scale)))
-        new_h = min(1920, int(round(height * scale)))
-        rgb = rgb.resize((max(new_w, 1), max(new_h, 1)), Image.Resampling.LANCZOS)
-    rgb = ImageOps.autocontrast(rgb, cutoff=1)
-    rgb = rgb.filter(ImageFilter.UnsharpMask(radius=1.4, percent=140, threshold=2))
-    gray = rgb.convert("L")
-    if ImageStat.Stat(gray).mean[0] < 85:
-        rgb = ImageOps.invert(rgb)
-    return rgb
+    return ImageOps.autocontrast(image.convert("RGB"), cutoff=0)
 
 
 def _clean_line(text: str) -> str:
@@ -249,9 +241,10 @@ def _rapidocr_image(image: Any) -> tuple[str, float, str | None]:
         return "", 0.0, f"{type(exc).__name__}: {exc}"
 
 
-def _tesseract_image(image: Any) -> tuple[str, str | None]:
-    ok, detail = tesseract_status()
+def _tesseract_image(image: Any, *, tess_ok: bool | None = None) -> tuple[str, str | None]:
+    ok = tess_ok if tess_ok is not None else tesseract_status()[0]
     if not ok:
+        detail = tesseract_status()[1] if tess_ok is None else "Tesseract unavailable"
         return "", detail
     try:
         import pytesseract
@@ -290,22 +283,103 @@ def _merge_texts(primary: str, secondary: str) -> str:
     return secondary
 
 
-def ocr_image(path: Path) -> tuple[str | None, str, str | None, str | None]:
+def probe_ocr_engines() -> tuple[bool, bool, str]:
+    rapid_ok, rapid_detail = rapidocr_status()
+    tess_ok, tess_detail = tesseract_status()
+    return rapid_ok, tess_ok, f"{rapid_detail}; {tess_detail}"
+
+
+def _gray_preview(path: Path, width: int = 320):
+    from PIL import Image
+
+    with Image.open(path) as raw:
+        rgb = raw.convert("RGB")
+        if rgb.size[0] > width:
+            height = max(1, int(round(rgb.size[1] * (width / rgb.size[0]))))
+            rgb = rgb.resize((width, height))
+        return rgb.convert("L")
+
+
+def _file_digest(path: Path, cache: dict[str, str] | None = None) -> str:
+    key = str(path)
+    if cache is not None and key in cache:
+        return cache[key]
+    digest = hashlib.sha256(path.read_bytes()).hexdigest()
+    if cache is not None:
+        cache[key] = digest
+    return digest
+
+
+def images_equivalent(
+    path_a: Path,
+    path_b: Path,
+    *,
+    digest_cache: dict[str, str] | None = None,
+    preview_cache: dict[str, Any] | None = None,
+) -> bool:
+    """Conservative pixel match. Layout-similar slides with changed text must not match."""
+    if not path_a.is_file() or not path_b.is_file():
+        return False
+    try:
+        if path_a.resolve() == path_b.resolve():
+            return True
+    except OSError:
+        pass
+    if _file_digest(path_a, digest_cache) == _file_digest(path_b, digest_cache):
+        return True
+    try:
+        from PIL import ImageChops, ImageStat
+
+        def preview(path: Path):
+            key = str(path)
+            if preview_cache is not None and key in preview_cache:
+                return preview_cache[key]
+            image = _gray_preview(path)
+            if preview_cache is not None:
+                preview_cache[key] = image
+            return image
+
+        left = preview(path_a)
+        right = preview(path_b)
+        if left.size != right.size:
+            right = right.resize(left.size)
+        diff = ImageChops.difference(left, right)
+        extrema = diff.getextrema()
+        max_diff = extrema[1] if isinstance(extrema, tuple) else 255
+        mean_diff = float(ImageStat.Stat(diff).mean[0])
+        return max_diff <= EQUIV_MAX_DIFF and mean_diff <= EQUIV_MEAN_DIFF
+    except Exception:
+        return False
+
+
+def ocr_image(
+    path: Path,
+    *,
+    rapid_ok: bool | None = None,
+    tess_ok: bool | None = None,
+) -> tuple[str | None, str, str | None, str | None]:
     """Return (text, status, error, engine)."""
-    if not any_engine_available():
-        _tesseract_ok, tess_detail = tesseract_status()
-        _rapid_ok, rapid_detail = rapidocr_status()
-        return None, "unavailable", f"{rapid_detail}; {tess_detail}", None
+    engine_detail = None
+    if rapid_ok is None or tess_ok is None:
+        probed_rapid, probed_tess, engine_detail = probe_ocr_engines()
+        rapid_ok = probed_rapid if rapid_ok is None else rapid_ok
+        tess_ok = probed_tess if tess_ok is None else tess_ok
+    if not rapid_ok and not tess_ok:
+        if engine_detail is None:
+            _rapid_ok, rapid_detail = rapidocr_status()
+            _tess_ok, tess_detail = tesseract_status()
+            engine_detail = f"{rapid_detail}; {tess_detail}"
+        return None, "unavailable", engine_detail, None
     try:
         from PIL import Image
 
         with Image.open(path) as raw:
             prepared = preprocess_for_ocr(raw)
-            rapid_text, _score, _rapid_err = _rapidocr_image(prepared)
+            rapid_text, _score, _rapid_err = _rapidocr_image(prepared) if rapid_ok else ("", 0.0, None)
             engine = "rapidocr" if rapid_text else None
             text = rapid_text
-            if _alnum_count(rapid_text) < 12:
-                tess_text, _tess_err = _tesseract_image(prepared)
+            if tess_ok and _alnum_count(rapid_text) < 12:
+                tess_text, _tess_err = _tesseract_image(prepared, tess_ok=True)
                 if tess_text:
                     merged = _merge_texts(rapid_text, tess_text)
                     if merged != rapid_text:
@@ -316,9 +390,42 @@ def ocr_image(path: Path) -> tuple[str | None, str, str | None, str | None]:
             cleaned = text.strip() if text else ""
             if not cleaned:
                 return None, "ok", None, None
-            return cleaned, "ok", None, engine or "rapidocr"
+            return cleaned, "ok", None, engine or ("rapidocr" if rapid_ok else "tesseract")
     except Exception as exc:  # noqa: BLE001
         return None, "failed", str(exc), None
+
+
+def _load_checkpoint(path: Path) -> dict[str, Any]:
+    if not path.is_file():
+        return {}
+    try:
+        from vsl_study.cache import read_json
+
+        data = read_json(path)
+        return data if isinstance(data, dict) else {}
+    except Exception:
+        return {}
+
+
+def _apply_checkpoint_row(record: ScreenshotRecord, row: dict[str, Any]) -> None:
+    record.ocr_text = row.get("ocr_text")
+    record.ocr_status = str(row.get("ocr_status") or "skipped")
+    record.ocr_engine = row.get("ocr_engine")
+    record.ocr_skip_reason = str(row.get("ocr_skip_reason") or "")
+    record.ocr_reused_from = str(row.get("ocr_reused_from") or "")
+    record.selected_for_ocr = bool(row.get("selected_for_ocr", True))
+
+
+def _checkpoint_row(record: ScreenshotRecord) -> dict[str, Any]:
+    return {
+        "id": record.id,
+        "ocr_text": record.ocr_text,
+        "ocr_status": record.ocr_status,
+        "ocr_engine": record.ocr_engine,
+        "ocr_skip_reason": record.ocr_skip_reason,
+        "ocr_reused_from": record.ocr_reused_from,
+        "selected_for_ocr": record.selected_for_ocr,
+    }
 
 
 def apply_ocr(
@@ -326,47 +433,122 @@ def apply_ocr(
     job_root: Path,
     enabled: bool,
     progress: ProgressCb | None = None,
+    *,
+    selected_ids: set[str] | None = None,
+    checkpoint_path: Path | None = None,
 ) -> str | None:
     if not enabled:
         for record in records:
             record.ocr_status = "skipped"
             record.ocr_text = None
             record.ocr_engine = None
+            record.ocr_skip_reason = "disabled"
+            record.ocr_reused_from = ""
+            record.selected_for_ocr = False
         return None
-    if not any_engine_available():
-        _ok_r, rapid_detail = rapidocr_status()
-        _ok_t, tess_detail = tesseract_status()
-        detail = f"{rapid_detail}; {tess_detail}"
+    rapid_ok, tess_ok, detail = probe_ocr_engines()
+    if not rapid_ok and not tess_ok:
         for record in records:
             record.ocr_status = "unavailable"
             record.ocr_text = None
             record.ocr_engine = None
+            record.ocr_skip_reason = ""
+            record.ocr_reused_from = ""
+            record.selected_for_ocr = False
         return detail
+    targets = set(selected_ids) if selected_ids is not None else {record.id for record in records}
+    checkpoint = _load_checkpoint(checkpoint_path) if checkpoint_path else {}
+    saved_rows = {str(row.get("id")): row for row in checkpoint.get("screenshots") or [] if row.get("id")}
+    for record in records:
+        row = saved_rows.get(record.id)
+        if row:
+            _apply_checkpoint_row(record, row)
+
     if progress:
         if not _rapid_tried:
             progress("ocr", "Loading OCR models (first run may take a minute)")
         else:
             progress("ocr", "Reading on-screen text from screenshots")
-    _get_rapidocr()
+    if rapid_ok:
+        _get_rapidocr()
     last_error = None
-    total = len(records)
-    for index, record in enumerate(records):
+    completed_ok = [record for record in records if record.ocr_status in {"ok", "reused"}]
+    pending = [
+        record
+        for record in records
+        if record.id in targets and record.ocr_status not in {"ok", "reused", "failed", "unavailable"}
+    ]
+    total = max(len(targets), 1)
+    done = sum(
+        1
+        for record in records
+        if record.id in targets and record.ocr_status in {"ok", "reused", "failed", "unavailable"}
+    )
+    for record in records:
+        if record.id in targets:
+            record.selected_for_ocr = True
+            continue
+        if record.ocr_status in {"ok", "reused", "failed", "unavailable"}:
+            continue
+        record.ocr_status = "skipped"
+        record.ocr_text = None
+        record.ocr_engine = None
+        record.ocr_skip_reason = "sampling_policy"
+        record.ocr_reused_from = ""
+        record.selected_for_ocr = False
+
+    writes = 0
+    digest_cache: dict[str, str] = {}
+    preview_cache: dict[str, Any] = {}
+    for record in pending:
         path = job_root / record.relative_path
+        done += 1
+        report = total <= 30 or done == 1 or done == total or done % 10 == 0
+        if progress and report:
+            progress("ocr", f"{done}/{total} {record.id}")
         if not path.is_file():
             record.ocr_status = "failed"
             record.ocr_text = None
             record.ocr_engine = None
+            record.ocr_skip_reason = ""
             last_error = f"missing image {record.relative_path}"
-            continue
-        report = total <= 30 or index == 0 or index + 1 == total or (index + 1) % 10 == 0
-        if progress and report:
-            progress("ocr", f"{index + 1}/{total} {record.id}")
-        text, status, err, engine = ocr_image(path)
-        record.ocr_status = status
-        record.ocr_text = text
-        record.ocr_engine = engine
-        if err:
-            last_error = err
+        else:
+            reused = None
+            for prior in completed_ok:
+                prior_path = job_root / prior.relative_path
+                if prior.ocr_status in {"ok", "reused"} and images_equivalent(
+                    path,
+                    prior_path,
+                    digest_cache=digest_cache,
+                    preview_cache=preview_cache,
+                ):
+                    reused = prior
+                    break
+            if reused is not None:
+                record.ocr_status = "reused"
+                record.ocr_text = reused.ocr_text
+                record.ocr_engine = reused.ocr_engine
+                record.ocr_skip_reason = ""
+                record.ocr_reused_from = reused.id
+            else:
+                text, status, err, engine = ocr_image(path, rapid_ok=rapid_ok, tess_ok=tess_ok)
+                record.ocr_status = status
+                record.ocr_text = text
+                record.ocr_engine = engine
+                record.ocr_skip_reason = ""
+                record.ocr_reused_from = ""
+                if err:
+                    last_error = err
+                if status == "ok":
+                    completed_ok.append(record)
+        writes += 1
+        if checkpoint_path and (writes % CHECKPOINT_EVERY == 0 or done >= total):
+            atomic_write_json(
+                checkpoint_path,
+                {"screenshots": [_checkpoint_row(item) for item in records]},
+            )
+    if checkpoint_path:
+        atomic_write_json(checkpoint_path, {"screenshots": [_checkpoint_row(item) for item in records]})
     return last_error
 
 
@@ -374,17 +556,21 @@ def format_onscreen_text(records: list[ScreenshotRecord]) -> str:
     lines = [
         "# On-screen text from screenshots (OCR).",
         "# This is separate from the spoken Whisper transcript. It is not calibrated accuracy.",
+        "# Sampled OCR is not an exhaustive check of every screenshot.",
         "",
     ]
     previous = None
     any_text = False
+    sampled_skip = 0
     for record in records:
         stamp = format_timecode(record.actual_time)
         engine = record.ocr_engine or record.ocr_status
-        if record.ocr_status == "ok" and record.ocr_text:
+        if record.ocr_status in {"ok", "reused"} and record.ocr_text:
             any_text = True
             same = previous is not None and record.ocr_text == previous
             header = f"{record.id}  {stamp}  [{engine}]"
+            if record.ocr_status == "reused" and record.ocr_reused_from:
+                header += f"  (reused from {record.ocr_reused_from})"
             if same:
                 lines.append(f"{header}  (same as previous frame)")
             else:
@@ -395,31 +581,57 @@ def format_onscreen_text(records: list[ScreenshotRecord]) -> str:
         elif record.ocr_status in {"failed", "unavailable"}:
             lines.append(f"{record.id}  {stamp}  [{record.ocr_status}]")
             lines.append("")
+        elif record.ocr_status == "skipped" and record.ocr_skip_reason == "sampling_policy":
+            sampled_skip += 1
+            lines.append(f"{record.id}  {stamp}  [skipped by sampling policy]")
+            lines.append("")
+            previous = None
         else:
             previous = None
     if not any_text:
         statuses = {r.ocr_status for r in records} or {"skipped"}
-        if statuses <= {"skipped"}:
+        skip_reasons = {r.ocr_skip_reason for r in records}
+        if statuses <= {"skipped"} and skip_reasons <= {"disabled", ""}:
             lines.append("OCR was turned off for this job.")
         elif statuses <= {"unavailable"}:
             lines.append("OCR engines were unavailable.")
+        elif sampled_skip:
+            lines.append(
+                "No on-screen text was detected in the OCR-selected frames. "
+                "Other screenshots were skipped by sampling policy and were not checked for text."
+            )
         else:
             lines.append("No on-screen text was detected in the captured frames.")
+        lines.append("")
+    elif sampled_skip:
+        lines.append(
+            f"# {sampled_skip} screenshot(s) were skipped by sampling policy and were not OCR-checked."
+        )
         lines.append("")
     return "\n".join(lines)
 
 
 def write_ocr_outputs(root: Path, records: list[ScreenshotRecord], enabled: bool, note: str | None) -> None:
     engines = engine_versions()
+    selected = sum(1 for record in records if record.selected_for_ocr)
+    reused = sum(1 for record in records if record.ocr_status == "reused")
+    skipped = sum(1 for record in records if record.ocr_skip_reason == "sampling_policy")
     payload = {
         "schema": 1,
         "enabled": enabled,
         "note": (
             "On-screen text is stored separately from spoken transcript. "
-            "OCR is not a calibrated accuracy percentage."
+            "OCR is not a calibrated accuracy percentage. "
+            "Skipped-by-policy frames were not checked for text."
         ),
         "engine_note": note,
         "engines": engines,
+        "coverage": {
+            "screenshots": len(records),
+            "selected": selected,
+            "reused": reused,
+            "skipped_by_policy": skipped,
+        },
         "frames": [
             {
                 "id": record.id,
@@ -429,6 +641,9 @@ def write_ocr_outputs(root: Path, records: list[ScreenshotRecord], enabled: bool
                 "relative_path": record.relative_path,
                 "status": record.ocr_status,
                 "engine": record.ocr_engine,
+                "skip_reason": record.ocr_skip_reason or None,
+                "reused_from": record.ocr_reused_from or None,
+                "selected_for_ocr": record.selected_for_ocr,
                 "text": record.ocr_text,
             }
             for record in records

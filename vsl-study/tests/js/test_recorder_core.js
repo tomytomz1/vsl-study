@@ -3,7 +3,7 @@ const assert = require("node:assert/strict");
 const crypto = require("crypto");
 const path = require("path");
 
-const { CapturePipeline } = require(path.resolve(__dirname, "../../src/vsl_study/recorder/recorder-core.js"));
+const { CapturePipeline, applyStudyVideoConstraints, STUDY_CAPTURE_PROFILE, settingsMatchProfile } = require(path.resolve(__dirname, "../../src/vsl_study/recorder/recorder-core.js"));
 
 function sha256(bytes) {
   return Promise.resolve(crypto.createHash("sha256").update(Buffer.from(bytes)).digest("hex"));
@@ -262,4 +262,38 @@ test("stale recorder page stops tracks and delayed callbacks cannot mutate anoth
   } finally {
     process.off("unhandledRejection", onUnhandled);
   }
+});
+
+test("applyStudyVideoConstraints records actual settings and does not claim a 4K fallback is optimized", async () => {
+  const track = {
+    settings: { width: 3840, height: 1730, frameRate: 30 },
+    applyConstraints() {
+      return Promise.reject(Object.assign(new Error("OverconstrainedError"), { name: "OverconstrainedError" }));
+    },
+    getSettings() {
+      return this.settings;
+    },
+  };
+  const report = await applyStudyVideoConstraints(track, () => true, STUDY_CAPTURE_PROFILE);
+  assert.equal(report.constraintApplied, false);
+  assert.equal(report.matchesProfile, false);
+  assert.equal(report.after.width, 3840);
+  assert.equal(settingsMatchProfile(report.after, STUDY_CAPTURE_PROFILE), false);
+});
+
+test("applyStudyVideoConstraints rechecks ownership after the await", async () => {
+  let live = true;
+  const track = {
+    settings: { width: 1280, height: 720, frameRate: 10 },
+    applyConstraints() {
+      live = false;
+      return Promise.resolve();
+    },
+    getSettings() {
+      return this.settings;
+    },
+  };
+  const report = await applyStudyVideoConstraints(track, () => live, STUDY_CAPTURE_PROFILE);
+  assert.equal(report.stale, true);
+  assert.equal(report.constraintApplied, false);
 });

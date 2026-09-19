@@ -9,7 +9,7 @@ from conftest import requires_ffmpeg, write_color_video
 from vsl_study.cache import JobDir, atomic_write_text
 from vsl_study.export import write_five_minute_folders, write_reports, write_zip
 from vsl_study.models import ProcessSettings, Scene, ScreenshotRecord, TranscriptResult, TranscriptSegment, VideoInfo
-from vsl_study.pipeline import PipelineError, process_video
+from vsl_study.pipeline import process_video
 
 
 def _info(path: str, duration: float = 700.0) -> VideoInfo:
@@ -265,13 +265,18 @@ def test_failed_pipeline_rebuild_preserves_previous_zip(tmp_path: Path, monkeypa
         raise OSError("disk full")
 
     monkeypatch.setattr("vsl_study.pipeline.write_zip", boom)
-    with pytest.raises(PipelineError, match="incomplete"):
-        process_video(video, out, settings=ProcessSettings(interval=1.0, compact_view=False, ocr=False))
+    result = process_video(video, out, settings=ProcessSettings(interval=1.0, compact_view=False, ocr=False))
+    assert result["package_status"] == "failed"
+    assert result["report_ready"] is True
+    assert result.get("zip") is None
+    assert "disk full" in str(result.get("package_error") or "")
     assert zpath.read_bytes() == original
     assert hashlib.sha256(zpath.read_bytes()).hexdigest() == digest
     job = json.loads((out / "job.json").read_text(encoding="utf-8"))
     assert job["stages"]["export"]["status"] == "failed"
     assert job["stages"]["export"]["status"] != "complete"
+    assert (out / "report.html").exists()
+    assert job["stages"]["reports"]["status"] == "complete"
 
 
 def test_write_reports_survives_contact_sheet_pillow_error(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):

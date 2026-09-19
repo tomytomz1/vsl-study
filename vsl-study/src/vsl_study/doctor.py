@@ -36,9 +36,18 @@ def collect_checks(*, include_streamlit: bool = True) -> list[Check]:
     try:
         import whisper  # noqa: F401
 
-        checks.append(Check("openai-whisper", True, "import whisper ok"))
+        checks.append(Check("openai-whisper", True, "import whisper ok (CUDA path)", required=False))
     except Exception as exc:  # noqa: BLE001
-        checks.append(Check("openai-whisper", False, f"{type(exc).__name__}: {exc}"))
+        checks.append(Check("openai-whisper", False, f"{type(exc).__name__}: {exc}", required=False))
+
+    try:
+        import faster_whisper  # noqa: F401
+        import importlib.metadata
+
+        version = importlib.metadata.version("faster-whisper")
+        checks.append(Check("faster-whisper", True, f"{version} (CPU INT8 path)"))
+    except Exception as exc:  # noqa: BLE001
+        checks.append(Check("faster-whisper", False, f"{type(exc).__name__}: {exc}"))
 
     try:
         import torch
@@ -48,12 +57,12 @@ def collect_checks(*, include_streamlit: bool = True) -> list[Check]:
             Check(
                 "torch",
                 True,
-                f"{torch.__version__}; cuda={'yes' if cuda else 'no (CPU fp32)'}",
-                required=True,
+                f"{torch.__version__}; cuda={'yes' if cuda else 'no'}",
+                required=False,
             )
         )
     except Exception as exc:  # noqa: BLE001
-        checks.append(Check("torch", False, str(exc)))
+        checks.append(Check("torch", False, str(exc), required=False))
 
     try:
         import importlib.metadata

@@ -703,7 +703,7 @@ def capture_candidates(
     scenes: list[Scene],
     job_frames: Path,
     max_width: int,
-    candidates: list[CaptureCandidate],
+    candidates: Sequence[CaptureCandidate],
     existing: dict[str, ScreenshotRecord] | None = None,
     progress: ProgressCb | None = None,
     frame_source: Callable[[VideoInfo, int], Iterable[tuple[float, bytes]]] | None = None,

@@ -17,6 +17,7 @@ import tkinter as tk
 
 from vsl_study.capture_meta import apply_desktop_capture_event, public_capture_record, resolve_capture_for_source
 from vsl_study.models import ProcessSettings
+from vsl_study.sampling import sampling_for_quality
 from vsl_study.transcribe import SettingsError, validate_model_language
 
 BG = "#F3F0EA"
@@ -80,6 +81,8 @@ STAGE_TITLES = {
     "frames": "Taking screenshots",
     "ocr": "Reading text on screen",
     "export": "Saving your folder",
+    "reports": "Writing the report",
+    "report_ready": "Report ready",
     "done": "Finished",
     "error": "Something went wrong",
     "recording": "Recording",
@@ -98,6 +101,8 @@ MESSAGE_REWRITES = (
         "Writing transcripts, reports, and evidence folders",
         "Writing the transcript, screenshots, and report into your folder.",
     ),
+    ("Report ready; packaging in progress", "Report is ready. Packaging the ZIP file."),
+    ("Copying the source recording into the evidence package", "Copying the recording into the package."),
     ("Loading OCR models", "Loading the on-screen text reader. The first time can take a minute."),
     ("Reading on-screen text from screenshots", "Reading prices, headlines, and other text in the pictures."),
     ("Detecting scenes with PySceneDetect", "Looking for moments when the picture changes."),
@@ -161,12 +166,30 @@ def _whisper_model(quality: str, language: str, task: str = "transcribe") -> str
     return "small.en" if use_english_only else "small"
 
 
+def job_done_payload(result: dict) -> dict:
+    """Keep report-ready vs package-complete distinct in the desktop completion message."""
+    return {
+        "job": result.get("job"),
+        "transcript_status": result.get("transcript_status", "complete"),
+        "package_status": result.get("package_status", "complete"),
+        "report_ready": bool(result.get("report_ready")),
+        "package_error": result.get("package_error"),
+    }
+
+
 def format_job_completion(result: dict) -> tuple[str, str]:
     """Status line and log line after process_video. Visual outputs may exist without speech."""
     job = str(result.get("job") or "")
     status = str(result.get("transcript_status") or "complete")
+    package = str(result.get("package_status") or "")
+    if package == "failed" or (result.get("report_ready") and package == "failed"):
+        return (
+            "Report is ready. Packaging failed.",
+            f"The report is in {job}. The ZIP package was not replaced.",
+        )
     if status == "complete":
-        return "Finished. Your folder is ready.", f"Wrote evidence package to {job}"
+        done = "Package complete. Your folder is ready." if package == "complete" else "Finished. Your folder is ready."
+        return done, f"Wrote evidence package to {job}"
     if status == "failed":
         return (
             "Study folder saved, but the spoken words could not be written down.",
@@ -979,7 +1002,7 @@ class VSLStudyApp:
     def _set_running(self, running: bool) -> None:
         self.running = running
         if running:
-            self.run_btn.configure(state="disabled", text="Working…", bg=ACCENT_OFF, cursor="arrow")
+            self.run_btn.configure(state="disabled", text="Starting…", bg=ACCENT_OFF, cursor="arrow")
             self._sync_capture_buttons()
         else:
             self.run_btn.configure(state="normal", text="Create study folder", bg=ACCENT, cursor="hand2")
@@ -1193,8 +1216,15 @@ class VSLStudyApp:
                 break
             if kind == "progress":
                 stage, message = payload.split("\t", 1)
+                if stage == "report_ready":
+                    self.last_job = message
+                    self.status_var.set("Report is ready. Packaging the ZIP file.")
+                    self._append_log("export", "Report is ready. Packaging the ZIP file.")
+                    continue
                 self.status_var.set(_friendly_text(stage, message))
                 self._append_log(stage, message)
+                title = STAGE_TITLES.get(stage) or "Working…"
+                self.run_btn.configure(text=title)
             elif kind == "done":
                 self._set_running(False)
                 data = json.loads(payload) if isinstance(payload, str) and payload.startswith("{") else {"job": payload, "transcript_status": "complete"}
@@ -1263,16 +1293,23 @@ class VSLStudyApp:
             messagebox.showerror("VSL Study", str(exc), parent=self.root)
             return None
         cleaned = public_capture_record(capture) if capture else None
+        quality = _value_for(SPEECH_QUALITY_OPTIONS, self.speech_var.get(), "recommended")
+        sampling = sampling_for_quality(quality)
         return ProcessSettings(
             model=model,
             language=language,
             task=task,
             detector="adaptive",
-            interval=5.0,
+            interval=float(sampling["interval"]),
             ocr=bool(self.ocr_var.get()),
             include_media=bool(self.media_var.get()),
             device="auto",
             capture=dict(cleaned) if cleaned else None,
+            sampling_policy=str(sampling["sampling_policy"]),
+            max_auto_screenshots=int(sampling["max_auto_screenshots"]) if sampling["max_auto_screenshots"] is not None else None,
+            ocr_budget=int(sampling["ocr_budget"]) if sampling["ocr_budget"] is not None else None,
+            transcribe_backend="faster-whisper",
+            transcribe_compute_type="int8",
         )
 
     def _start_process(self, source: str, dest: str, settings: ProcessSettings) -> None:
@@ -1305,7 +1342,7 @@ class VSLStudyApp:
                     alt = unique_job_dir(Path(out), "rec")
                     progress("export", f"That folder already belongs to another video. Saving to {alt}")
                     result = process_video(source, alt, settings=settings, progress=progress)
-                self.messages.put(("done", json.dumps({"job": result["job"], "transcript_status": result.get("transcript_status", "complete")})))
+                self.messages.put(("done", json.dumps(job_done_payload(result))))
             except Exception as exc:  # noqa: BLE001
                 self.messages.put(("error", str(exc) or traceback.format_exc()))
 

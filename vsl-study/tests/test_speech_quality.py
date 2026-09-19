@@ -1,6 +1,6 @@
 import json
 
-from vsl_study.desktop import _whisper_model, format_job_completion, unique_job_dir
+from vsl_study.desktop import _whisper_model, format_job_completion, job_done_payload, unique_job_dir
 
 
 def test_whisper_model_quality_language_and_translate():
@@ -16,7 +16,30 @@ def test_whisper_model_quality_language_and_translate():
         assert _whisper_model(quality, "auto", "translate") == multi
 
 
-def test_format_job_completion_distinguishes_transcript_failure():
+def test_format_job_completion_distinguishes_package_and_report_ready():
+    done, log = format_job_completion(
+        {"job": "/out", "transcript_status": "complete", "package_status": "complete", "report_ready": True}
+    )
+    assert "package complete" in done.lower()
+    failed, flog = format_job_completion(
+        {"job": "/out", "transcript_status": "complete", "package_status": "failed", "report_ready": True}
+    )
+    assert "report is ready" in failed.lower()
+    assert "packaging failed" in failed.lower()
+    assert "/out" in flog
+    payload = job_done_payload(
+        {
+            "job": "/out",
+            "transcript_status": "complete",
+            "package_status": "failed",
+            "report_ready": True,
+            "package_error": "disk full",
+            "zip": None,
+        }
+    )
+    assert payload["package_status"] == "failed"
+    assert payload["report_ready"] is True
+    assert "screenshot_count" not in payload
     done, log = format_job_completion({"job": "/out", "transcript_status": "complete"})
     assert "ready" in done.lower()
     assert "/out" in log

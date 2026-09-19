@@ -127,6 +127,31 @@ def _capture_markdown_lines(capture: dict[str, Any]) -> list[str]:
         )
     if capture.get("media_duration_s") is not None:
         lines.append(f"- Recorded media duration: {capture.get('media_duration_s')}s")
+    requested = capture.get("capture_requested") if isinstance(capture.get("capture_requested"), dict) else {}
+    observed = capture.get("capture_observed") if isinstance(capture.get("capture_observed"), dict) else {}
+    if requested or observed or capture.get("capture_profile"):
+        match = capture.get("capture_matches_profile")
+        match_label = _capture_bool_label(match)
+        lines.append(
+            "- Capture profile: "
+            f"{capture.get('capture_profile') or 'unspecified'} · matches requested study size: {match_label}"
+        )
+        if requested:
+            lines.append(
+                "- Requested capture: "
+                f"width={requested.get('width')} frameRate={requested.get('frameRate')} "
+                f"videoBitsPerSecond={requested.get('videoBitsPerSecond')}"
+            )
+        if observed:
+            lines.append(
+                "- Observed capture track: "
+                f"width={observed.get('width')} height={observed.get('height')} "
+                f"frameRate={observed.get('frameRate')}"
+            )
+        if match is False:
+            lines.append("- This file is not labeled as an optimized study recording.")
+        if capture.get("capture_constraint_error"):
+            lines.append(f"- Capture constraint note: {capture.get('capture_constraint_error')}")
     if complete is False:
         lines.append("- This recording may cover only part of the video.")
     if capture.get("timeline_note"):
@@ -459,6 +484,9 @@ def _write_markdown(
         f"- Audio: {'yes' if info.has_audio else 'no'}",
         f"- Model: {transcript.model} / language: {transcript.language} / device: {transcript.device}",
         f"- Detector: {settings.detector} / interval: {settings.interval}s",
+        f"- Sampling: {settings.sampling_policy} / max automatic screenshots: {settings.max_auto_screenshots}",
+        f"- OCR budget: {settings.ocr_budget}",
+        f"- Transcription backend: {transcript.backend or settings.transcribe_backend} / {transcript.compute_type or settings.transcribe_compute_type}",
         "",
         "## Processing notes",
         "",
@@ -507,13 +535,24 @@ def _write_markdown(
     lines.append("")
     lines.append("This layer is separate from spoken transcript. OCR is not calibrated accuracy.")
     lines.append("")
-    ocr_hits = [s for s in screenshots if s.ocr_status == "ok" and s.ocr_text]
-    if any(s.ocr_status == "skipped" for s in screenshots) and not ocr_hits:
+    ocr_hits = [s for s in screenshots if s.ocr_status in {"ok", "reused"} and s.ocr_text]
+    skipped_policy = [s for s in screenshots if s.ocr_skip_reason == "sampling_policy"]
+    if any(s.ocr_status == "skipped" and s.ocr_skip_reason == "disabled" for s in screenshots) and not ocr_hits:
         lines.append("OCR was turned off for this job. Re-run with OCR enabled to capture slides, prices, and captions.")
     elif any(s.ocr_status == "unavailable" for s in screenshots) and not ocr_hits:
         lines.append("OCR engines were unavailable. Install RapidOCR (`rapidocr-onnxruntime`) or Tesseract.")
+    elif not ocr_hits and skipped_policy:
+        lines.append(
+            "No on-screen text was detected in the OCR-selected frames. "
+            "Other screenshots were skipped by sampling policy and were not checked for text."
+        )
     elif not ocr_hits:
         lines.append("No on-screen text was detected in the captured frames.")
+    else:
+        lines.append(
+            f"OCR ran on {sum(1 for s in screenshots if s.selected_for_ocr)} of {len(screenshots)} screenshots. "
+            "This is sampled coverage, not an exhaustive still-by-still read."
+        )
     for shot in ocr_hits:
         engine = f" _{shot.ocr_engine}_" if shot.ocr_engine else ""
         block = shot.ocr_text.replace("\n", " / ")
@@ -598,10 +637,20 @@ def _write_html(
         )
     for shot in screenshots:
         ocr_html = ""
-        if shot.ocr_status == "ok" and shot.ocr_text:
-            ocr_html = f"<p class='ocr'><strong>On-screen text (OCR)</strong>: {html.escape(shot.ocr_text)}</p>"
+        if shot.ocr_status in {"ok", "reused"} and shot.ocr_text:
+            reused = (
+                f" (reused from {html.escape(shot.ocr_reused_from)})"
+                if shot.ocr_status == "reused" and shot.ocr_reused_from
+                else ""
+            )
+            ocr_html = (
+                f"<p class='ocr'><strong>On-screen text (OCR)</strong>: "
+                f"{html.escape(shot.ocr_text)}{reused}</p>"
+            )
         elif shot.ocr_status in {"failed", "unavailable"}:
             ocr_html = f"<p class='ocr'>OCR {html.escape(shot.ocr_status)}</p>"
+        elif shot.ocr_skip_reason == "sampling_policy":
+            ocr_html = "<p class='ocr'>OCR skipped by sampling policy</p>"
         events.append(
             _event(
                 shot.actual_time,
@@ -640,18 +689,29 @@ def _write_html(
         notes += _capture_html_items(capture)
     gap_note = "".join(f"<li><pre>{html.escape(json.dumps(g))}</pre></li>" for g in gaps)
     versions_html = "".join(f"<li>{html.escape(k)}: {html.escape(v)}</li>" for k, v in versions.items())
-    ocr_hits = [s for s in screenshots if s.ocr_status == "ok" and s.ocr_text]
+    ocr_hits = [s for s in screenshots if s.ocr_status in {"ok", "reused"} and s.ocr_text]
+    skipped_policy = any(s.ocr_skip_reason == "sampling_policy" for s in screenshots)
     if ocr_hits:
         ocr_list = "".join(
             f"<li><code>{html.escape(s.id)}</code> {html.escape(format_timecode(s.actual_time))}"
             f" — {html.escape(s.ocr_text.replace(chr(10), ' / '))}</li>"
             for s in ocr_hits
         )
-        ocr_section = f"<h2>On-screen text (OCR)</h2><ul>{ocr_list}</ul>"
-    elif any(s.ocr_status == "skipped" for s in screenshots):
+        coverage = (
+            f"<p>OCR ran on {sum(1 for s in screenshots if s.selected_for_ocr)} of "
+            f"{len(screenshots)} screenshots. This is sampled coverage, not exhaustive.</p>"
+        )
+        ocr_section = f"<h2>On-screen text (OCR)</h2>{coverage}<ul>{ocr_list}</ul>"
+    elif any(s.ocr_status == "skipped" and s.ocr_skip_reason == "disabled" for s in screenshots):
         ocr_section = "<h2>On-screen text (OCR)</h2><p>OCR was turned off for this job.</p>"
     elif any(s.ocr_status == "unavailable" for s in screenshots):
         ocr_section = "<h2>On-screen text (OCR)</h2><p>OCR engines were unavailable.</p>"
+    elif skipped_policy:
+        ocr_section = (
+            "<h2>On-screen text (OCR)</h2>"
+            "<p>No on-screen text was detected in the OCR-selected frames. "
+            "Other screenshots were skipped by sampling policy and were not checked for text.</p>"
+        )
     else:
         ocr_section = "<h2>On-screen text (OCR)</h2><p>No on-screen text was detected in the captured frames.</p>"
     page = f"""<!DOCTYPE html>

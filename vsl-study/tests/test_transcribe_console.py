@@ -101,7 +101,10 @@ def test_transcribe_wav_with_missing_console_streams(tmp_path: Path, monkeypatch
     try:
         sys.stdout = None  # type: ignore[assignment]
         sys.stderr = None  # type: ignore[assignment]
-        result = transcribe_wav(str(wav), ProcessSettings(model="tiny.en", language="en", device="cpu"))
+        result = transcribe_wav(
+            str(wav),
+            ProcessSettings(model="tiny.en", language="en", device="cpu", transcribe_backend="openai-whisper"),
+        )
     finally:
         sys.stdout, sys.stderr = old_out, old_err
     assert result.status == "complete"

@@ -540,6 +540,12 @@ class CaptureHandler(BaseHTTPRequestHandler):
                 browser=body.get("browser") if isinstance(body.get("browser"), dict) else {},
                 problems=problems,
                 recording_path=str(used_path),
+                capture_profile=str(body.get("capture_profile") or ""),
+                capture_requested=body.get("capture_requested") if isinstance(body.get("capture_requested"), dict) else {},
+                capture_observed=body.get("capture_observed") if isinstance(body.get("capture_observed"), dict) else {},
+                capture_matches_profile=body.get("capture_matches_profile") if isinstance(body.get("capture_matches_profile"), bool) else None,
+                capture_constraint_error=str(body.get("capture_constraint_error") or ""),
+                capture_constraint_applied=body.get("capture_constraint_applied") if isinstance(body.get("capture_constraint_applied"), bool) else None,
             )
             atomic_write_json(capture_file, record)
             process = should_process(stop_reason, complete, audio_ok)

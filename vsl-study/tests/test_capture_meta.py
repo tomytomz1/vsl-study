@@ -217,3 +217,26 @@ def test_invalid_job_capture_cannot_reappear_when_not_provided(tmp_path: Path):
     atomic_write_json(job.job_file, stored)
     job.bind_source(identity, ProcessSettings(capture=None, ocr=False), capture_rejected=False)
     assert "capture" not in (job.load_job() or {})
+
+
+def test_capture_profile_fields_are_public_and_not_optimized_when_mismatched():
+    raw = build_capture_record(
+        recording_id="meta0001",
+        recording_path=r"C:\captures\meta0001\recording.webm",
+        complete=True,
+        audio_track=True,
+        capture_profile="study-1280-10",
+        capture_requested={"width": 1280, "frameRate": 10, "videoBitsPerSecond": 1200000},
+        capture_observed={"width": 3840, "height": 1730, "frameRate": 30},
+        capture_matches_profile=False,
+        capture_constraint_error="OverconstrainedError",
+        capture_constraint_applied=False,
+    )
+    cleaned = public_capture_record(raw)
+    assert cleaned is not None
+    assert cleaned["capture_matches_profile"] is False
+    assert cleaned["capture_observed"]["width"] == 3840
+    text = "\n".join(_capture_markdown_lines(cleaned))
+    assert "not labeled as an optimized study recording" in text
+    assert "3840" in text
+    assert "study-1280-10" in text

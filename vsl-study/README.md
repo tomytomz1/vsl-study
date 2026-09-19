@@ -27,7 +27,15 @@ Each job folder contains:
 - **FFmpeg and ffprobe** on `PATH`
 - Optional: **Tesseract** as an extra OCR fallback. RapidOCR ships with the Python package and does not need a PATH install. Missing OCR does not block transcription or screenshots.
 
-CPU transcription is normal. It is **not real-time**. A long VSL on CPU with `small.en` can take much longer than the video duration. There is no NVIDIA GPU requirement; CUDA is used only when PyTorch reports it is available.
+CPU transcription uses **faster-whisper** with CPU INT8 by default. The English model remains **`small.en`** unless you pick Faster (`base.en`) or More accurate (`medium.en`). This is still not real-time. CUDA/openai-whisper remains available when a GPU is present. There is no NVIDIA GPU requirement.
+
+New browser recordings request a **study capture profile**: maximum width 1280, 10 fps, tab audio, no crop or stretch. Actual track settings are stored with the job. A 4K fallback is not labeled as an optimized recording.
+
+New jobs sample screenshots about every **15 seconds** plus scene changes, with a **600** automatic still cap (opening and last frame kept; manual timestamps are extra). OCR covers up to **300** automatic images and does not treat layout-similar slides as identical. Sampled evidence is not exhaustive. More accurate speech quality uses a denser 5-second preset.
+
+The report can be opened when writing finishes even if ZIP packaging is still running or later fails. `timings.json` records stage durations and cache hits.
+
+Older jobs keep the settings stored in `job.json`. Loading them does not silently switch to the new sampling or transcription backend.
 
 ### FFmpeg
 
@@ -69,8 +77,9 @@ cd "vsl-study"
 py -3.11 -m venv .venv
 .\.venv\Scripts\Activate.ps1
 python -m pip install --upgrade pip
-python -m pip install torch --index-url https://download.pytorch.org/whl/cpu
 python -m pip install -e ".[dev]"
+# Optional: CUDA / openai-whisper GPU path
+python -m pip install torch --index-url https://download.pytorch.org/whl/cpu
 python -m vsl_study doctor
 ```
 
@@ -83,12 +92,13 @@ cd vsl-study
 python3.11 -m venv .venv
 source .venv/bin/activate
 python -m pip install --upgrade pip
-python -m pip install torch --index-url https://download.pytorch.org/whl/cpu
 python -m pip install -e ".[dev]"
+# Optional: CUDA / openai-whisper GPU path
+python -m pip install torch --index-url https://download.pytorch.org/whl/cpu
 python -m vsl_study doctor
 ```
 
-The first Whisper run **downloads model weights** into the library cache (often `~/.cache/whisper`). After that, core processing does not need the network.
+The first transcription run **downloads model weights** (faster-whisper uses a Hugging Face cache; openai-whisper often uses `~/.cache/whisper`). After that, core processing does not need the network.
 
 ## Use it like a normal Windows app
 
@@ -122,11 +132,13 @@ After you click **Record a browser tab**:
 
 Timestamps in the report are relative to **this recording**, not verified times in the original video.
 
+See `docs/processing-performance.md` for post-Stop defaults, cache versions, and what still needs a live benchmark.
+
 ## Commands
 
 ```bash
 python -m vsl_study doctor
-python -m vsl_study process --input "C:/Videos/yu-sleep.mp4" --output "./output/yu-sleep" --model small.en --language en --interval 5
+python -m vsl_study process --input "C:/Videos/yu-sleep.mp4" --output "./output/yu-sleep" --model small.en --language en
 python -m vsl_study frames --job "./output/yu-sleep" --at 00:02:15.500 00:17:40
 python -m vsl_study ui
 ```
@@ -140,7 +152,7 @@ If Streamlit asks for an email on first launch, leave it blank or use the projec
 Put your local recording on disk, then:
 
 ```powershell
-python -m vsl_study process --input "PATH\TO\yu-sleep.mp4" --output ".\output\yu-sleep" --model small.en --language en --interval 5
+python -m vsl_study process --input "PATH\TO\yu-sleep.mp4" --output ".\output\yu-sleep" --model small.en --language en
 ```
 
 Nothing in the code is hardcoded to Yu Sleep. Any local MP4/MOV/MKV/WebM with decodable streams works.

@@ -4,6 +4,13 @@
   const CapturePipeline = Capture.CapturePipeline;
   const RecorderPage = Capture.RecorderPage;
   const parsePageGeneration = Capture.parsePageGeneration;
+  const applyStudyVideoConstraints = Capture.applyStudyVideoConstraints;
+  const STUDY_CAPTURE_PROFILE = Capture.STUDY_CAPTURE_PROFILE || {
+    id: "study-1280-10",
+    targetWidth: 1280,
+    targetFrameRate: 10,
+    videoBitsPerSecond: 1200000,
+  };
   const $ = (id) => document.getElementById(id);
   const STALE_PAGE_MESSAGE = "This recording session has ended. Open a new recorder from VSL Study.";
 
@@ -21,6 +28,7 @@
     heartbeat: null,
     pipeline: null,
     meterContext: null,
+    captureReport: null,
   };
 
   const page = new RecorderPage({
@@ -236,7 +244,11 @@
       return;
     }
     stopTracks(state.stream);
-    const video = { displaySurface: "browser" };
+    const video = {
+      displaySurface: "browser",
+      width: { max: STUDY_CAPTURE_PROFILE.targetWidth, ideal: STUDY_CAPTURE_PROFILE.targetWidth },
+      frameRate: { max: STUDY_CAPTURE_PROFILE.targetFrameRate, ideal: STUDY_CAPTURE_PROFILE.targetFrameRate },
+    };
     const opts = {
       video,
       audio: true,
@@ -257,6 +269,15 @@
       abandonChooseStream(stream);
       return;
     }
+    const videoTrack = stream.getVideoTracks()[0];
+    const captureReport = applyStudyVideoConstraints
+      ? await applyStudyVideoConstraints(videoTrack, () => page.canMutate() && op === chooseOp, STUDY_CAPTURE_PROFILE)
+      : { matchesProfile: false, constraintError: "capture helpers missing", after: {}, requested: {} };
+    if (!page.canMutate() || op !== chooseOp || captureReport.stale) {
+      abandonChooseStream(stream);
+      return;
+    }
+    state.captureReport = captureReport;
     state.stream = stream;
     $("preview").srcObject = stream;
     $("preview").muted = true;
@@ -281,8 +302,19 @@
     });
     if (!state.audioTrack) {
       status("No audio track came back. In the picker, select the video tab and enable tab audio. Do not continue without sound.");
-    } else {
+    } else if (state.captureReport && state.captureReport.matchesProfile) {
       status("Preview is muted so it will not echo. Play a moment of the video to confirm the meter moves, then start at the beginning if you can.");
+    } else {
+      const after = (state.captureReport && state.captureReport.after) || {};
+      const width = after.width || "?";
+      const height = after.height || "?";
+      const fps = after.frameRate || "?";
+      const note = state.captureReport && state.captureReport.constraintError
+        ? ` ${state.captureReport.constraintError}.`
+        : "";
+      status(
+        `Preview is muted so it will not echo. Browser kept ${width}×${height} at ${fps} fps; this is not the study 1280px/10fps profile.${note} Play a moment of the video to confirm the meter moves, then start at the beginning if you can.`
+      );
     }
   };
 
@@ -403,6 +435,16 @@
         title: $("title").value,
         browser: { userAgent: navigator.userAgent, vendor: navigator.vendor },
         generation: page.generation,
+        capture_profile: STUDY_CAPTURE_PROFILE.id,
+        capture_requested: (state.captureReport && state.captureReport.requested) || {
+          width: STUDY_CAPTURE_PROFILE.targetWidth,
+          frameRate: STUDY_CAPTURE_PROFILE.targetFrameRate,
+          videoBitsPerSecond: STUDY_CAPTURE_PROFILE.videoBitsPerSecond,
+        },
+        capture_observed: (state.captureReport && state.captureReport.after) || {},
+        capture_matches_profile: Boolean(state.captureReport && state.captureReport.matchesProfile),
+        capture_constraint_error: (state.captureReport && state.captureReport.constraintError) || "",
+        capture_constraint_applied: Boolean(state.captureReport && state.captureReport.constraintApplied),
       }),
     });
   }
@@ -464,7 +506,10 @@
       await ensureSession();
       watchSession();
       state.pipeline = makePipeline();
-      const rec = new MediaRecorder(state.stream, { mimeType: state.mime, videoBitsPerSecond: 2_500_000 });
+      const rec = new MediaRecorder(state.stream, {
+        mimeType: state.mime,
+        videoBitsPerSecond: STUDY_CAPTURE_PROFILE.videoBitsPerSecond,
+      });
       state.recorder = rec;
       rec.ondataavailable = (ev) => {
         if (!state.pipeline || page.ended || !page.canMutate()) return;
