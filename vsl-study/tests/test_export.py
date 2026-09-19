@@ -7,8 +7,8 @@ import pytest
 
 from conftest import requires_ffmpeg, write_color_video
 from vsl_study.cache import JobDir, atomic_write_text
-from vsl_study.export import write_five_minute_folders, write_zip
-from vsl_study.models import ProcessSettings, ScreenshotRecord, TranscriptResult, TranscriptSegment, VideoInfo
+from vsl_study.export import write_five_minute_folders, write_reports, write_zip
+from vsl_study.models import ProcessSettings, Scene, ScreenshotRecord, TranscriptResult, TranscriptSegment, VideoInfo
 from vsl_study.pipeline import PipelineError, process_video
 
 
@@ -272,4 +272,73 @@ def test_failed_pipeline_rebuild_preserves_previous_zip(tmp_path: Path, monkeypa
     job = json.loads((out / "job.json").read_text(encoding="utf-8"))
     assert job["stages"]["export"]["status"] == "failed"
     assert job["stages"]["export"]["status"] != "complete"
+
+
+def test_write_reports_survives_contact_sheet_pillow_error(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
+    job = JobDir(tmp_path / "job")
+    job.ensure()
+    (job.frames / "frame_0001.jpg").write_bytes(b"not-a-jpeg")
+    shot = ScreenshotRecord(
+        id="frame_0001",
+        requested_time=1.0,
+        actual_time=1.0,
+        scene_id="scene_0001",
+        relative_path="frames/frame_0001.jpg",
+        capture_reason="interval",
+    )
+    transcript = TranscriptResult(
+        status="complete",
+        model="tiny.en",
+        language="en",
+        language_source="configured",
+        device="cpu",
+        device_note="test",
+        segments=[TranscriptSegment(id="seg_0001", start=0.0, end=1.0, text="hello")],
+        text="hello",
+    )
+    gaps: list[dict] = []
+
+    def boom(*_args, **_kwargs):
+        raise OSError("broken data stream when writing image file")
+
+    monkeypatch.setattr("vsl_study.export.write_contact_sheet", boom)
+    write_reports(
+        job,
+        _info("x.mp4", 12.0),
+        ProcessSettings(compact_view=True, ocr=False),
+        transcript,
+        [Scene("scene_0001", 0.0, 12.0)],
+        [shot],
+        gaps,
+        {"pillow": "test"},
+        {"frames": {"status": "complete"}},
+    )
+    assert (job.root / "report.md").is_file()
+    assert (job.root / "report.html").is_file()
+    assert any("broken data stream when writing image file" in str(g.get("detail")) for g in gaps)
+    md = (job.root / "report.md").read_text(encoding="utf-8")
+    assert "broken data stream when writing image file" in md
+
+
+@requires_ffmpeg
+def test_pipeline_survives_contact_sheet_pillow_error(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
+    video = write_color_video(tmp_path / "src.mp4", duration=1.2, audio=True)
+
+    def boom(*_args, **_kwargs):
+        raise OSError("broken data stream when writing image file")
+
+    monkeypatch.setattr("vsl_study.export.write_contact_sheet", boom)
+    out = tmp_path / "job"
+    result = process_video(
+        video,
+        out,
+        settings=ProcessSettings(interval=1.0, compact_view=False, ocr=False),
+    )
+    assert (out / "vsl_study_evidence.zip").is_file()
+    assert (out / "report.html").is_file()
+    job = json.loads((out / "job.json").read_text(encoding="utf-8"))
+    assert job["stages"]["export"]["status"] == "complete"
+    report = (out / "report.md").read_text(encoding="utf-8")
+    assert "broken data stream when writing image file" in report
+    assert result["screenshot_count"] >= 1
 

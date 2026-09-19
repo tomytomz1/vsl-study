@@ -1,3 +1,5 @@
+import json
+
 from vsl_study.desktop import _whisper_model, format_job_completion, unique_job_dir
 
 
@@ -33,3 +35,14 @@ def test_unique_job_dir_only_when_bound(tmp_path):
     other = unique_job_dir(dest, "abc")
     assert other != dest
     assert other.name.endswith("-abc")
+
+
+def test_unique_job_dir_reuses_same_recording(tmp_path):
+    dest = tmp_path / "out"
+    dest.mkdir()
+    rec = "3590c01ea35543008dc08a13f5670e65"
+    (dest / "job.json").write_text(
+        json.dumps({"capture": {"recording_id": rec}}),
+        encoding="utf-8",
+    )
+    assert unique_job_dir(dest, rec[:8]) == dest

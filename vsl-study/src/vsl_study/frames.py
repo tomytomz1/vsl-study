@@ -508,22 +508,36 @@ def iter_decoded_frames(
             pass
 
 
+# Pillow 11 Image.new / JPEG encode refuse a side longer than 65500 and raise
+# OSError: broken data stream when writing image file. Long VSLs with ~1600
+# widescreen thumbs exceed that in a single sheet.
+MAX_CONTACT_SHEET_DIMENSION = 65000
+
+
 def _ensure_max_width(path: Path, max_width: int) -> None:
-    with Image.open(path) as image:
-        image = image.convert("RGB")
-        if image.width <= max_width:
-            if path.suffix.lower() != ".jpg":
-                image.save(path, format="JPEG", quality=90)
-            return
-        height = max(1, round(image.height * max_width / image.width))
-        resized = image.resize((max_width, height), Image.Resampling.LANCZOS)
-        resized.save(path, format="JPEG", quality=90)
+    try:
+        with Image.open(path) as image:
+            image = image.convert("RGB")
+            image.load()
+            if image.width <= max_width:
+                if path.suffix.lower() != ".jpg":
+                    image.save(path, format="JPEG", quality=90)
+                return
+            height = max(1, round(image.height * max_width / image.width))
+            resized = image.resize((max_width, height), Image.Resampling.LANCZOS)
+            resized.save(path, format="JPEG", quality=90)
+    except OSError:
+        # Leave the original bytes. A truncated JPEG must not abort capture.
+        return
 
 
-def ahash(path: Path, size: int = 8) -> str:
-    with Image.open(path) as image:
-        gray = image.convert("L").resize((size, size), Image.Resampling.BILINEAR)
-        pixels = list(gray.getdata())
+def ahash(path: Path, size: int = 8) -> str | None:
+    try:
+        with Image.open(path) as image:
+            gray = image.convert("L").resize((size, size), Image.Resampling.BILINEAR)
+            pixels = list(gray.getdata())
+    except OSError:
+        return None
     avg = sum(pixels) / max(len(pixels), 1)
     return "".join("1" if p >= avg else "0" for p in pixels)
 
@@ -546,6 +560,10 @@ def apply_sequential_compact(
             record.compact_retained = True
             continue
         digest = ahash(path)
+        if digest is None:
+            record.compact_retained = True
+            record.notes.append("compact hash skipped: unreadable screenshot")
+            continue
         if last_hash is not None and hamming(digest, last_hash) <= threshold:
             record.compact_retained = False
             record.compact_refers_to = last_id
@@ -556,32 +574,64 @@ def apply_sequential_compact(
             last_hash = digest
 
 
-def write_contact_sheet(
-    records: list[ScreenshotRecord],
-    job_root: Path,
-    dest: Path,
-    columns: int = 4,
-    thumb_w: int = 320,
-) -> Path:
-    """Contact sheet with IDs/timestamps in margins, not over the screenshot pixels."""
-    items: list[tuple[ScreenshotRecord, Image.Image]] = []
-    for record in records:
-        path = job_root / record.relative_path
-        if not path.exists():
-            continue
-        with Image.open(path) as image:
-            rgb = image.convert("RGB")
-            ratio = thumb_w / max(rgb.width, 1)
-            thumb = rgb.resize((thumb_w, max(1, round(rgb.height * ratio))), Image.Resampling.LANCZOS)
-        items.append((record, thumb))
-    if not items:
-        dest.parent.mkdir(parents=True, exist_ok=True)
-        empty = Image.new("RGB", (thumb_w, 80), (245, 245, 245))
-        empty.save(dest, format="JPEG", quality=90)
-        return dest
+def _thumbnail_for_contact(path: Path, thumb_w: int) -> Image.Image:
+    with Image.open(path) as image:
+        rgb = image.convert("RGB")
+        rgb.load()
+        ratio = thumb_w / max(rgb.width, 1)
+        return rgb.resize((thumb_w, max(1, round(rgb.height * ratio))), Image.Resampling.LANCZOS)
 
-    caption_h = 36
-    pad = 8
+
+def _contact_page_capacity(
+    columns: int,
+    thumb_w: int,
+    cell_h: int,
+    pad: int,
+    max_dimension: int,
+) -> tuple[int, int]:
+    """Return (columns, items_per_page) that fit Pillow/JPEG dimension limits."""
+    columns = max(1, columns)
+    thumb_w = max(1, thumb_w)
+    cell_h = max(1, cell_h)
+    pad = max(0, pad)
+    max_dimension = max(1, max_dimension)
+    while columns > 1 and columns * (thumb_w + pad) + pad > max_dimension:
+        columns -= 1
+    usable_h = max(1, max_dimension - pad)
+    row_h = cell_h + pad
+    rows = max(1, usable_h // row_h)
+    return columns, max(1, rows * columns)
+
+
+def _contact_sheet_page_path(dest: Path, page: int) -> Path:
+    if page <= 1:
+        return dest
+    return dest.with_name(f"{dest.stem}-{page:02d}{dest.suffix}")
+
+
+def _remove_stale_contact_pages(dest: Path) -> None:
+    parent = dest.parent
+    if not parent.is_dir():
+        return
+    prefix = dest.stem + "-"
+    suffix = dest.suffix.lower()
+    for path in parent.glob(f"{dest.stem}-*{dest.suffix}"):
+        rest = path.stem[len(prefix) :] if path.stem.startswith(prefix) else ""
+        if rest.isdigit() and path.suffix.lower() == suffix:
+            try:
+                path.unlink()
+            except OSError:
+                pass
+
+
+def _render_contact_page(
+    items: list[tuple[ScreenshotRecord, Image.Image]],
+    dest: Path,
+    columns: int,
+    thumb_w: int,
+    caption_h: int,
+    pad: int,
+) -> None:
     rows = (len(items) + columns - 1) // columns
     cell_h = max(im.height for _, im in items) + caption_h
     width = columns * (thumb_w + pad) + pad
@@ -602,7 +652,50 @@ def write_contact_sheet(
         draw.text((x + 4, y + thumb.height + 8), caption, fill=(20, 20, 20), font=font)
     dest.parent.mkdir(parents=True, exist_ok=True)
     sheet.save(dest, format="JPEG", quality=90)
-    return dest
+
+
+def write_contact_sheet(
+    records: list[ScreenshotRecord],
+    job_root: Path,
+    dest: Path,
+    columns: int = 4,
+    thumb_w: int = 320,
+    max_dimension: int = MAX_CONTACT_SHEET_DIMENSION,
+) -> tuple[list[Path], list[str]]:
+    """Write one or more JPEG pages. Unreadable frames are skipped, not fatal."""
+    items: list[tuple[ScreenshotRecord, Image.Image]] = []
+    skipped: list[str] = []
+    for record in records:
+        path = job_root / record.relative_path
+        if not path.exists():
+            continue
+        try:
+            thumb = _thumbnail_for_contact(path, thumb_w)
+        except Exception as exc:  # noqa: BLE001
+            record.notes.append(f"contact sheet skipped unreadable screenshot: {exc}")
+            skipped.append(record.id)
+            continue
+        items.append((record, thumb))
+    dest.parent.mkdir(parents=True, exist_ok=True)
+    _remove_stale_contact_pages(dest)
+    if not items:
+        empty = Image.new("RGB", (thumb_w, 80), (245, 245, 245))
+        empty.save(dest, format="JPEG", quality=90)
+        return [dest], skipped
+
+    caption_h = 36
+    pad = 8
+    cell_h = max(im.height for _, im in items) + caption_h
+    page_columns, per_page = _contact_page_capacity(columns, thumb_w, cell_h, pad, max_dimension)
+    written: list[Path] = []
+    page = 1
+    for offset in range(0, len(items), per_page):
+        chunk = items[offset : offset + per_page]
+        path = _contact_sheet_page_path(dest, page)
+        _render_contact_page(chunk, path, page_columns, thumb_w, caption_h, pad)
+        written.append(path)
+        page += 1
+    return written, skipped
 
 
 def capture_candidates(

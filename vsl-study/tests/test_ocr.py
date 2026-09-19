@@ -1,10 +1,13 @@
+import io
 from pathlib import Path
 
+import pytest
 from PIL import Image, ImageDraw, ImageFont
 
 from conftest import requires_ffmpeg, run_ffmpeg
 from vsl_study.models import ProcessSettings, ScreenshotRecord
 from vsl_study.ocr import (
+    any_engine_available,
     apply_ocr,
     format_onscreen_text,
     ocr_image,
@@ -102,6 +105,75 @@ def test_format_onscreen_collapses_duplicate_frames():
 
 def test_process_settings_ocr_defaults_on():
     assert ProcessSettings().ocr is True
+
+
+def _truncated_jpeg(path: Path, keep: int = 36) -> Path:
+    buf = io.BytesIO()
+    Image.new("RGB", (96, 54), "white").save(buf, format="JPEG", quality=90)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_bytes(buf.getvalue()[:keep])
+    return path
+
+
+def _shot(frame_id: str, rel: str, t: float = 1.0) -> ScreenshotRecord:
+    return ScreenshotRecord(
+        id=frame_id,
+        requested_time=t,
+        actual_time=t,
+        scene_id="scene_0001",
+        relative_path=rel,
+        capture_reason="interval",
+    )
+
+
+def test_ocr_image_truncated_jpeg_is_failed_not_ok(tmp_path: Path):
+    if not any_engine_available():
+        pytest.skip("OCR engine required to reach image decode")
+    path = _truncated_jpeg(tmp_path / "trunc.jpg")
+    text, status, err, engine = ocr_image(path)
+    assert status == "failed"
+    assert text is None
+    assert err
+    assert engine is None
+
+
+def test_apply_ocr_continues_after_truncated_and_pillow_error(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
+    if not any_engine_available():
+        pytest.skip("OCR engine required to reach image decode")
+    from vsl_study import ocr as ocr_mod
+
+    _write_slide(tmp_path / "frames" / "frame_0001.jpg", ["YU SLEEP"])
+    _truncated_jpeg(tmp_path / "frames" / "frame_0002.jpg")
+    _write_slide(tmp_path / "frames" / "frame_0003.jpg", ["BUY NOW 39"])
+    _write_slide(tmp_path / "frames" / "frame_0004.jpg", ["LIMITED"])
+
+    real_preprocess = ocr_mod.preprocess_for_ocr
+
+    def wrapped(image):
+        filename = str(getattr(image, "filename", "") or "")
+        if "frame_0004" in filename.replace("\\", "/"):
+            raise OSError("broken data stream when writing image file")
+        return real_preprocess(image)
+
+    monkeypatch.setattr(ocr_mod, "preprocess_for_ocr", wrapped)
+    records = [
+        _shot("frame_0001", "frames/frame_0001.jpg", 1.0),
+        _shot("frame_0002", "frames/frame_0002.jpg", 2.0),
+        _shot("frame_0003", "frames/frame_0003.jpg", 3.0),
+        _shot("frame_0004", "frames/frame_0004.jpg", 4.0),
+    ]
+    note = apply_ocr(records, tmp_path, enabled=True)
+    assert records[0].ocr_status == "ok"
+    assert records[0].ocr_text
+    assert records[1].ocr_status == "failed"
+    assert records[1].ocr_text is None
+    assert records[2].ocr_status == "ok"
+    assert records[2].ocr_text
+    assert records[3].ocr_status == "failed"
+    assert records[3].ocr_text is None
+    assert note
+    assert "broken data stream when writing image file" in note
+    assert {r.ocr_status for r in records} != {"ok"}
 
 
 @requires_ffmpeg

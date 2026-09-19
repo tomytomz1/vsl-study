@@ -290,6 +290,38 @@ def write_five_minute_folders(
     return created
 
 
+def _write_contact_sheet_safely(
+    records: list[ScreenshotRecord],
+    job: JobDir,
+    dest: Path,
+    gaps: list[dict[str, Any]],
+    label: str,
+) -> None:
+    try:
+        _paths, skipped = write_contact_sheet(records, job.root, dest)
+    except Exception as exc:  # noqa: BLE001
+        gaps.append(
+            {
+                "type": "contact_sheet",
+                "status": "failed",
+                "detail": f"{label}: {exc}",
+            }
+        )
+        return
+    if skipped:
+        gaps.append(
+            {
+                "type": "contact_sheet",
+                "status": "partial",
+                "detail": (
+                    f"Skipped {len(skipped)} unreadable screenshot(s) while writing {label}: "
+                    + ", ".join(skipped[:24])
+                ),
+                "ids": skipped,
+            }
+        )
+
+
 def write_reports(
     job: JobDir,
     info: VideoInfo,
@@ -302,10 +334,22 @@ def write_reports(
     stage_status: dict[str, Any],
     packaged_media: dict[str, Any] | None = None,
 ) -> None:
-    write_contact_sheet(screenshots, job.root, job.contact_sheets / "all.jpg")
+    _write_contact_sheet_safely(
+        screenshots,
+        job,
+        job.contact_sheets / "all.jpg",
+        gaps,
+        label="contact_sheets/all.jpg",
+    )
     retained = [s for s in screenshots if s.compact_retained]
     if settings.compact_view:
-        write_contact_sheet(retained, job.root, job.contact_sheets / "compact.jpg")
+        _write_contact_sheet_safely(
+            retained,
+            job,
+            job.contact_sheets / "compact.jpg",
+            gaps,
+            label="contact_sheets/compact.jpg",
+        )
     _write_markdown(
         job, info, settings, transcript, scenes, screenshots, gaps, versions, stage_status, packaged_media
     )

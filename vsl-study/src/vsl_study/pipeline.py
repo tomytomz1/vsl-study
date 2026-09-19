@@ -161,8 +161,12 @@ def process_video(
     ocr_note = _stage_ocr(job, screenshots, settings, progress)
     write_ocr_outputs(job.root, screenshots, settings.ocr, ocr_note)
     gaps = match_screenshots(screenshots, transcript.segments, settings.context_window_s)
+    compact_error: str | None = None
     if settings.compact_view:
-        apply_sequential_compact(screenshots, job.frames)
+        try:
+            apply_sequential_compact(screenshots, job.frames)
+        except Exception as exc:  # noqa: BLE001
+            compact_error = str(exc)
 
     _progress(progress, "export", "Writing transcripts, reports, and evidence folders")
     write_transcripts(job, transcript)
@@ -172,6 +176,8 @@ def process_video(
     versions = dependency_versions()
     stage_status = (job.load_job() or {}).get("stages", {})
     processing_gaps = list(gaps)
+    if compact_error:
+        processing_gaps.append({"type": "compact", "status": "failed", "detail": compact_error})
     if ocr_note and settings.ocr:
         processing_gaps.append({"type": "ocr", "status": "unavailable_or_failed", "detail": ocr_note})
     if transcript.status != "complete":

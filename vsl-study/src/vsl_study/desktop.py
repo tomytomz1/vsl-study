@@ -183,14 +183,32 @@ def format_job_completion(result: dict) -> tuple[str, str]:
     )
 
 
+def _job_matches_recording_suffix(job_file: Path, suffix: str) -> bool:
+    if not suffix:
+        return False
+    try:
+        data = json.loads(job_file.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError):
+        return False
+    if not isinstance(data, dict):
+        return False
+    rec = str((data.get("capture") or {}).get("recording_id") or "")
+    return rec.startswith(suffix)
+
+
 def unique_job_dir(dest: Path, suffix: str) -> Path:
     dest = dest.expanduser()
-    if not (dest / "job.json").exists():
+    job_file = dest / "job.json"
+    if not job_file.exists():
+        return dest
+    if _job_matches_recording_suffix(job_file, suffix):
         return dest
     parent = dest.parent
     candidate = parent / f"{dest.name}-{suffix}"
     n = 2
     while (candidate / "job.json").exists():
+        if _job_matches_recording_suffix(candidate / "job.json", suffix):
+            return candidate
         candidate = parent / f"{dest.name}-{suffix}-{n}"
         n += 1
     return candidate

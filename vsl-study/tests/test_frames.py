@@ -7,9 +7,17 @@ import pytest
 from PIL import Image
 
 from conftest import requires_ffmpeg, write_audio_longer_than_video, write_color_video, write_cut_video, write_vfr_video
-from vsl_study.frames import CaptureCandidate, build_candidates, capture_candidates, image_end_time, last_safe_time
+from vsl_study.frames import (
+    CaptureCandidate,
+    apply_sequential_compact,
+    build_candidates,
+    capture_candidates,
+    image_end_time,
+    last_safe_time,
+    write_contact_sheet,
+)
 from vsl_study.media import inspect_video
-from vsl_study.models import Scene, VideoInfo
+from vsl_study.models import Scene, ScreenshotRecord, VideoInfo
 from vsl_study.scenes import detect_scenes
 
 
@@ -212,3 +220,72 @@ def test_one_ffmpeg_decode_for_many_screenshots(tmp_path: Path, monkeypatch):
     # Must not spawn a from-zero select capture per screenshot.
     assert len(popen_calls) <= 2
     assert len(popen_calls) < len(candidates)
+
+
+def _write_jpeg(path: Path, size: tuple[int, int] = (80, 45), color: tuple[int, int, int] = (20, 80, 180)) -> Path:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    Image.new("RGB", size, color).save(path, format="JPEG", quality=85)
+    return path
+
+
+def _sheet_shot(frame_id: str, rel: str, t: float) -> ScreenshotRecord:
+    return ScreenshotRecord(
+        id=frame_id,
+        requested_time=t,
+        actual_time=t,
+        scene_id="scene_0001",
+        relative_path=rel,
+        capture_reason="interval",
+    )
+
+
+def test_contact_sheet_skips_truncated_jpeg_and_continues(tmp_path: Path):
+    frames = tmp_path / "frames"
+    _write_jpeg(frames / "frame_0001.jpg", color=(200, 0, 0))
+    buf = io.BytesIO()
+    Image.new("RGB", (80, 45), (0, 200, 0)).save(buf, format="JPEG", quality=85)
+    (frames / "frame_0002.jpg").write_bytes(buf.getvalue()[:28])
+    _write_jpeg(frames / "frame_0003.jpg", color=(0, 0, 200))
+    records = [
+        _sheet_shot("frame_0001", "frames/frame_0001.jpg", 1.0),
+        _sheet_shot("frame_0002", "frames/frame_0002.jpg", 2.0),
+        _sheet_shot("frame_0003", "frames/frame_0003.jpg", 3.0),
+    ]
+    dest = tmp_path / "contact_sheets" / "all.jpg"
+    paths, skipped = write_contact_sheet(records, tmp_path, dest, columns=2, thumb_w=40)
+    assert dest.is_file()
+    assert dest.stat().st_size > 32
+    assert [p.name for p in paths] == ["all.jpg"]
+    assert skipped == ["frame_0002"]
+    assert any("unreadable screenshot" in n for n in records[1].notes)
+    with Image.open(dest) as sheet:
+        sheet.verify()
+    apply_sequential_compact(records, frames)
+    assert records[1].compact_retained is True
+
+
+def test_contact_sheet_paginates_before_jpeg_dimension_limit(tmp_path: Path):
+    frames = tmp_path / "frames"
+    records = []
+    for i in range(1, 25):
+        rel = f"frames/frame_{i:04d}.jpg"
+        _write_jpeg(tmp_path / rel, size=(64, 48))
+        records.append(_sheet_shot(f"frame_{i:04d}", rel, float(i)))
+    dest = tmp_path / "contact_sheets" / "all.jpg"
+    paths, skipped = write_contact_sheet(
+        records,
+        tmp_path,
+        dest,
+        columns=4,
+        thumb_w=40,
+        max_dimension=220,
+    )
+    assert not skipped
+    assert len(paths) >= 2
+    assert paths[0] == dest
+    assert paths[1].name == "all-02.jpg"
+    for path in paths:
+        with Image.open(path) as sheet:
+            assert sheet.size[0] <= 220
+            assert sheet.size[1] <= 220
+            sheet.verify()
