@@ -76,14 +76,19 @@ def build_candidates(
     interval: float,
     scene_start_offset: float,
     extra_times: Iterable[float] = (),
+    sampling_end: float | None = None,
 ) -> list[CaptureCandidate]:
     duration = image_end_time(info)
+    if sampling_end is not None and sampling_end >= 0:
+        duration = min(duration, float(sampling_end))
     items: list[CaptureCandidate] = []
-    end_cap = last_safe_time(info)
+    end_cap = duration
     for scene in scenes:
         span = max(0.0, scene.end - scene.start)
         offset = min(scene_start_offset, max(0.0, span * 0.5))
         t = clamp_time(scene.start + offset, scene.start, max(scene.start, min(scene.end, end_cap)))
+        if t > end_cap + 1e-6:
+            continue
         items.append(CaptureCandidate(t, "scene_start", scene.id))
     if interval and interval > 0:
         t = 0.0
@@ -93,8 +98,9 @@ def build_candidates(
             t += interval
         scene = scene_for_time(scenes, end_cap)
         items.append(CaptureCandidate(end_cap, "interval", scene.id if scene else None))
+    extra_cap = last_safe_time(info)
     for raw in extra_times:
-        t = clamp_time(float(raw), 0.0, end_cap)
+        t = clamp_time(float(raw), 0.0, extra_cap)
         scene = scene_for_time(scenes, t)
         items.append(CaptureCandidate(t, "user", scene.id if scene else None))
 

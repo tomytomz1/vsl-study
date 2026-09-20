@@ -26,6 +26,10 @@ FASTER_OCR_BUDGET = 200
 NEAR_S = 0.25
 OCR_NEAR_S = 0.05
 END_ZONE_FRACTION = 0.88
+MIN_TRAILING_SILENCE_S = 90.0
+END_CARD_PAD_S = 30.0
+MIN_SPEECH_CHARS = 8
+ISLAND_GAP_S = 300.0
 
 PRIORITY = {"user": 0, "scene_start": 1, "interval": 2}
 
@@ -71,6 +75,52 @@ def _near(time_s: float, others: Iterable[float], window: float) -> bool:
     return any(abs(time_s - other) <= window for other in others)
 
 
+def _segment_text(segment: object) -> str:
+    raw = getattr(segment, "text", None)
+    if raw is None and isinstance(segment, dict):
+        raw = segment.get("text")
+    return " ".join(str(raw or "").split())
+
+
+def _segment_end(segment: object) -> float:
+    raw = getattr(segment, "end", None)
+    if raw is None and isinstance(segment, dict):
+        raw = segment.get("end")
+    try:
+        return float(raw or 0.0)
+    except (TypeError, ValueError):
+        return 0.0
+
+
+def last_substantial_speech_end(segments: Sequence[object] | None) -> float | None:
+    """Last real spoken end time. Ignores tiny leftover words after a long gap."""
+    ends: list[float] = []
+    for segment in segments or []:
+        compact = "".join(ch for ch in _segment_text(segment) if ch.isalnum())
+        if len(compact) < MIN_SPEECH_CHARS:
+            continue
+        ends.append(_segment_end(segment))
+    if not ends:
+        return None
+    if len(ends) >= 2 and (ends[-1] - ends[-2]) >= ISLAND_GAP_S:
+        return ends[-2]
+    return ends[-1]
+
+
+def sampling_horizon(duration_s: float, speech_end_s: float | None) -> tuple[float, float | None]:
+    """Screenshot end time, plus leftover seconds if the recording continued after speech."""
+    duration = max(float(duration_s or 0.0), 0.0)
+    if speech_end_s is None:
+        return duration, None
+    speech_end = max(0.0, float(speech_end_s))
+    tail = duration - speech_end
+    if tail < MIN_TRAILING_SILENCE_S:
+        return duration, None
+    horizon = min(duration, speech_end + END_CARD_PAD_S)
+    leftover = max(0.0, duration - horizon)
+    return horizon, leftover if leftover >= 1.0 else None
+
+
 def select_screenshots(
     candidates: Sequence[TimedCandidate],
     *,
@@ -80,8 +130,10 @@ def select_screenshots(
     """Keep opening/ending coverage, spread the automatic budget, and leave manuals outside it."""
     manuals = [item for item in candidates if item.reason == "user"]
     autos = [item for item in candidates if item.reason != "user"]
+    duration = max(float(duration_s or 0.0), 0.001)
+    autos = [item for item in autos if item.requested_time <= duration + NEAR_S]
     if max_auto is None or max_auto <= 0 or len(autos) <= max_auto:
-        return _merge_unique(list(candidates))
+        return _merge_unique(list(autos) + list(manuals))
 
     autos_sorted = sorted(autos, key=lambda item: (item.requested_time, PRIORITY.get(item.reason, 9)))
     selected: list[TimedCandidate] = []
@@ -193,15 +245,30 @@ def select_ocr_ids(
     return {item.id for item in chosen} | always
 
 
-def coverage_note(*, policy: str, interval: float, max_auto: int | None, ocr_budget: int | None) -> str:
+def coverage_note(
+    *,
+    policy: str,
+    interval: float,
+    max_auto: int | None,
+    ocr_budget: int | None,
+    leftover_s: float | None = None,
+    horizon_s: float | None = None,
+) -> str:
     if policy == LEGACY_POLICY or max_auto is None:
-        return (
+        note = (
             f"Screenshots use the stored job policy (interval {interval:g}s, no automatic cap). "
             "This is not a new bounded-sampling run."
         )
-    ocr = "all selected screenshots" if ocr_budget is None else f"up to {int(ocr_budget)} automatic images"
-    return (
-        f"Screenshots are sampled ({policy}: about every {interval:g}s plus scene changes, "
-        f"max {int(max_auto)} automatic stills). OCR covers {ocr}. "
-        "This is not an exhaustive frame-by-frame record."
-    )
+    else:
+        ocr = "all selected screenshots" if ocr_budget is None else f"up to {int(ocr_budget)} automatic images"
+        note = (
+            f"Screenshots are sampled ({policy}: about every {interval:g}s plus scene changes, "
+            f"max {int(max_auto)} automatic stills). OCR covers {ocr}. "
+            "This is not an exhaustive frame-by-frame record."
+        )
+    if leftover_s and horizon_s is not None:
+        note += (
+            f" Spoken content ended around {horizon_s:.0f}s; automatic screenshots stop there "
+            f"instead of covering {leftover_s:.0f}s of ended-video leftover."
+        )
+    return note

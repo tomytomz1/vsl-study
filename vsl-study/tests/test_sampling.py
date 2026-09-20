@@ -1,6 +1,12 @@
+import pytest
 from vsl_study.frames import CaptureCandidate
 from vsl_study.models import ProcessSettings, ScreenshotRecord, settings_from_stored
-from vsl_study.sampling import select_ocr_ids, select_screenshots
+from vsl_study.sampling import (
+    last_substantial_speech_end,
+    sampling_horizon,
+    select_ocr_ids,
+    select_screenshots,
+)
 
 
 def _shot(i: int, t: float, reason: str = "interval") -> ScreenshotRecord:
@@ -87,3 +93,41 @@ def test_new_settings_version_cache_keys_and_ocr_does_not_touch_transcript():
 
     shots = [_shot(1, 0.0)]
     assert _ocr_cache_key(a, shots) != _ocr_cache_key(b, shots)
+
+
+def test_trailing_silence_stops_screenshot_horizon_before_replay_tail():
+    class Seg:
+        def __init__(self, end, text):
+            self.end = end
+            self.text = text
+
+    speech_end = last_substantial_speech_end(
+        [
+            Seg(10.0, "More than 90 million Americans"),
+            Seg(4240.0, "Thank you for watching"),
+            Seg(4248.04, "and see you in the next episode."),
+            Seg(12119.64, "you"),
+        ]
+    )
+    assert speech_end == pytest.approx(4248.04)
+    horizon, leftover = sampling_horizon(12132.141, speech_end)
+    assert horizon == pytest.approx(4278.04)
+    assert leftover == pytest.approx(12132.141 - 4278.04)
+    duration = 12132.141
+    autos = [CaptureCandidate(float(t), "interval", None) for t in range(0, int(duration) + 1, 15)]
+    selected = select_screenshots(autos, duration_s=horizon, max_auto=600)
+    times = [item.requested_time for item in selected]
+    assert max(times) <= horizon + 1
+    assert max(times) < 5000
+    assert len(selected) <= 600
+
+
+def test_no_trim_when_speech_runs_to_the_end():
+    class Seg:
+        def __init__(self, end, text):
+            self.end = end
+            self.text = text
+
+    horizon, leftover = sampling_horizon(120.0, last_substantial_speech_end([Seg(118.0, "Click the button below")]))
+    assert leftover is None
+    assert horizon == pytest.approx(120.0)

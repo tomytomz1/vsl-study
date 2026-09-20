@@ -27,6 +27,7 @@ from vsl_study.frames import (
     apply_sequential_compact,
     build_candidates,
     capture_candidates,
+    image_end_time,
 )
 from vsl_study.media import extract_aligned_audio, inspect_video
 from vsl_study.models import (
@@ -43,7 +44,13 @@ from vsl_study.ocr import (
     engine_versions,
     write_ocr_outputs,
 )
-from vsl_study.sampling import coverage_note, select_ocr_ids, select_screenshots
+from vsl_study.sampling import (
+    coverage_note,
+    last_substantial_speech_end,
+    sampling_horizon,
+    select_ocr_ids,
+    select_screenshots,
+)
 from vsl_study.scenes import detect_scenes
 from vsl_study.timing import StageClock
 from vsl_study.transcribe import (
@@ -192,7 +199,21 @@ def process_video(
     with clock.span("transcript_write"):
         write_transcripts(job, transcript)
     scenes = _stage_scenes(job, info, settings, progress, clock=clock)
-    screenshots = _stage_frames(job, info, settings, scenes, extra_times, progress, clock=clock)
+    image_end = image_end_time(info)
+    horizon, leftover = sampling_horizon(image_end, last_substantial_speech_end(transcript.segments))
+    clock.note("screenshot_horizon_s", horizon)
+    clock.note("trailing_silence_s", leftover or 0)
+    screenshots = _stage_frames(
+        job,
+        info,
+        settings,
+        scenes,
+        extra_times,
+        progress,
+        clock=clock,
+        sampling_end=horizon,
+        leftover_s=leftover,
+    )
     ocr_note = _stage_ocr(job, screenshots, settings, progress, clock=clock)
     write_ocr_outputs(job.root, screenshots, settings.ocr, ocr_note)
     gaps = match_screenshots(screenshots, transcript.segments, settings.context_window_s)
@@ -235,9 +256,24 @@ def process_video(
                 interval=settings.interval,
                 max_auto=settings.max_auto_screenshots,
                 ocr_budget=settings.ocr_budget,
+                leftover_s=leftover,
+                horizon_s=horizon if leftover else None,
             ),
         }
     )
+    if leftover:
+        processing_gaps.append(
+            {
+                "type": "trailing_silence",
+                "detail": (
+                    f"Spoken content ended around {horizon:.1f}s. The recording continued for "
+                    f"{leftover:.1f}s after that (ended video / Replay). Automatic screenshots "
+                    "stop at the content end plus a short end-card window."
+                ),
+                "horizon_s": horizon,
+                "leftover_s": leftover,
+            }
+        )
     capture = settings.capture
     if capture and capture.get("complete") is False:
         processing_gaps.append(
@@ -506,8 +542,12 @@ def _stage_frames(
     extra_times: list[float],
     progress: ProgressCb | None,
     clock: StageClock | None = None,
+    sampling_end: float | None = None,
+    leftover_s: float | None = None,
 ) -> list[ScreenshotRecord]:
     key = settings.frames_key(info.fingerprint, extra_times)
+    if leftover_s:
+        key = f"{key}|hz={float(sampling_end or 0.0):.3f}|tailtrim-v1"
     cached = job.read_complete_stage("frames", key)
     if cached:
         if clock:
@@ -532,18 +572,26 @@ def _stage_frames(
         except Exception:
             existing = {}
 
+    if not existing:
+        for path in list(job.frames.glob("frame_*.jpg")):
+            try:
+                path.unlink()
+            except OSError:
+                pass
+
     candidates = build_candidates(
         info,
         scenes,
         interval=settings.interval,
         scene_start_offset=settings.scene_start_offset,
         extra_times=extra_times,
+        sampling_end=sampling_end,
     )
     candidate_count = len(candidates)
     if not settings.uses_legacy_screenshot_policy():
         candidates = select_screenshots(
             candidates,
-            duration_s=float(info.duration_s or 0.0),
+            duration_s=float(sampling_end if sampling_end is not None else info.duration_s or 0.0),
             max_auto=settings.max_auto_screenshots,
         )
     if clock:
@@ -553,7 +601,8 @@ def _stage_frames(
         progress,
         "frames",
         f"Capturing {len(candidates)} screenshots"
-        + (f" (from {candidate_count} candidates)" if candidate_count != len(candidates) else ""),
+        + (f" (from {candidate_count} candidates)" if candidate_count != len(candidates) else "")
+        + (f"; stopping at {float(sampling_end):.0f}s after spoken content ended" if leftover_s else ""),
     )
     job.write_stage(
         "frames",

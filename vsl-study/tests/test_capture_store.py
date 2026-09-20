@@ -101,6 +101,7 @@ def test_cancel_and_processing_once(tmp_path: Path):
 def test_should_process_only_intentional_complete():
     assert should_process("user_stop", True, True) is True
     assert should_process("max_duration", True, True) is True
+    assert should_process("trailing_silence", True, True) is True
     assert should_process("stop_sharing", True, True) is False
     assert should_process("user_stop", False, True) is False
     assert should_process("user_stop", True, False) is False

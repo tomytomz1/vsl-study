@@ -3,7 +3,7 @@ const assert = require("node:assert/strict");
 const crypto = require("crypto");
 const path = require("path");
 
-const { CapturePipeline, applyStudyVideoConstraints, STUDY_CAPTURE_PROFILE, settingsMatchProfile } = require(path.resolve(__dirname, "../../src/vsl_study/recorder/recorder-core.js"));
+const { CapturePipeline, applyStudyVideoConstraints, STUDY_CAPTURE_PROFILE, settingsMatchProfile, trailingSilenceShouldStop } = require(path.resolve(__dirname, "../../src/vsl_study/recorder/recorder-core.js"));
 
 function sha256(bytes) {
   return Promise.resolve(crypto.createHash("sha256").update(Buffer.from(bytes)).digest("hex"));
@@ -296,4 +296,59 @@ test("applyStudyVideoConstraints rechecks ownership after the await", async () =
   const report = await applyStudyVideoConstraints(track, () => live, STUDY_CAPTURE_PROFILE);
   assert.equal(report.stale, true);
   assert.equal(report.constraintApplied, false);
+});
+
+test("trailing silence after audio was heard should stop recording", () => {
+  assert.equal(
+    trailingSilenceShouldStop({
+      recording: true,
+      finishing: false,
+      audioHeard: true,
+      lastAudibleAt: 0,
+      now: 180000,
+      thresholdMs: 180000,
+    }),
+    true
+  );
+  assert.equal(
+    trailingSilenceShouldStop({
+      recording: true,
+      audioHeard: true,
+      lastAudibleAt: 1000,
+      now: 120000,
+      thresholdMs: 180000,
+    }),
+    false
+  );
+  assert.equal(
+    trailingSilenceShouldStop({
+      recording: true,
+      audioHeard: false,
+      lastAudibleAt: 0,
+      now: 180000,
+    }),
+    false
+  );
+  assert.equal(
+    trailingSilenceShouldStop({
+      recording: true,
+      finishing: true,
+      audioHeard: true,
+      lastAudibleAt: 0,
+      now: 180000,
+    }),
+    false
+  );
+});
+
+test("trailing_silence is treated as an intentional complete stop", async () => {
+  const pipe = pipeline();
+  pipe.acceptMedia(blob("A", 0));
+  const result = await pipe.finish("trailing_silence", {
+    stopRecorder: async () => {},
+    finalizeRemote: async () => ({ process: true, complete: true, reason: "trailing_silence" }),
+  });
+  assert.equal(result.process, true);
+  assert.equal(result.complete, true);
+  assert.equal(pipe.finalizeCalls, 1);
 });

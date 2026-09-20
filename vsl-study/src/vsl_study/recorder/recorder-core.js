@@ -218,7 +218,8 @@
     var finalizeRemote = hooks.finalizeRemote;
     var cancelRemote = hooks.cancelRemote;
     var failCodes = { upload_failed: true, backpressure: true, recorder_error: true, stop_timeout: true };
-    var finalizeReasons = { user_stop: true, max_duration: true, stop_sharing: true };
+    var finalizeReasons = { user_stop: true, max_duration: true, trailing_silence: true, stop_sharing: true };
+    var processReasons = { user_stop: true, max_duration: true, trailing_silence: true };
 
     function cancelAndStop() {
       self.cancelCalls += 1;
@@ -284,8 +285,8 @@
             return cancelAndStop();
           }
           return {
-            process: reason === "user_stop" || reason === "max_duration",
-            complete: reason === "user_stop" || reason === "max_duration",
+            process: Boolean(processReasons[reason]),
+            complete: Boolean(processReasons[reason]),
             reason: reason,
           };
         }
@@ -499,6 +500,35 @@
       });
   }
 
+  var TRAILING_SILENCE_MS = 180000;
+
+  function trailingSilenceShouldStop(opts) {
+    opts = opts || {};
+    if (!opts.recording || opts.finishing) {
+      return false;
+    }
+    if (!opts.audioHeard) {
+      return false;
+    }
+    if (opts.lastAudibleAt == null) {
+      return false;
+    }
+    var now = opts.now != null ? opts.now : Date.now();
+    var threshold = opts.thresholdMs != null ? Number(opts.thresholdMs) : TRAILING_SILENCE_MS;
+    return now - Number(opts.lastAudibleAt) >= threshold;
+  }
+
+  function averageFrequencyLevel(data) {
+    if (!data || !data.length) {
+      return 0;
+    }
+    var sum = 0;
+    for (var i = 0; i < data.length; i += 1) {
+      sum += data[i];
+    }
+    return sum / data.length / 255;
+  }
+
   return {
     CapturePipeline: CapturePipeline,
     CaptureError: CaptureError,
@@ -508,5 +538,8 @@
     studyDisplayMediaOptions: studyDisplayMediaOptions,
     applyStudyVideoConstraints: applyStudyVideoConstraints,
     settingsMatchProfile: settingsMatchProfile,
+    trailingSilenceShouldStop: trailingSilenceShouldStop,
+    averageFrequencyLevel: averageFrequencyLevel,
+    TRAILING_SILENCE_MS: TRAILING_SILENCE_MS,
   };
 });

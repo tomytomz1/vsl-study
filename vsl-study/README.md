@@ -31,7 +31,7 @@ CPU transcription uses **faster-whisper** with CPU INT8 by default. The English 
 
 New browser recordings request a **study capture profile**: maximum width 1280, 10 fps, tab audio, no crop or stretch. Actual track settings are stored with the job. A 4K fallback is not labeled as an optimized recording.
 
-New jobs sample screenshots about every **15 seconds** plus scene changes, with a **600** automatic still cap (opening and last frame kept; manual timestamps are extra). OCR covers up to **300** automatic images and does not treat layout-similar slides as identical. Sampled evidence is not exhaustive. More accurate speech quality uses a denser 5-second preset.
+New jobs sample screenshots about every **15 seconds** plus scene changes, with a **600** automatic still cap (opening and last frame kept; manual timestamps are extra). If the recording continues after spoken content ends, automatic screenshots stop shortly after that end instead of covering hours of Replay. OCR covers up to **300** automatic images and does not treat layout-similar slides as identical. Sampled evidence is not exhaustive. More accurate speech quality uses a denser 5-second preset.
 
 The report can be opened when writing finishes even if ZIP packaging is still running or later fails. `timings.json` records stage durations and cache hits.
 

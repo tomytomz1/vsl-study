@@ -5,6 +5,9 @@
   const RecorderPage = Capture.RecorderPage;
   const parsePageGeneration = Capture.parsePageGeneration;
   const applyStudyVideoConstraints = Capture.applyStudyVideoConstraints;
+  const trailingSilenceShouldStop = Capture.trailingSilenceShouldStop;
+  const averageFrequencyLevel = Capture.averageFrequencyLevel;
+  const TRAILING_SILENCE_MS = Capture.TRAILING_SILENCE_MS || 180000;
   const STUDY_CAPTURE_PROFILE = Capture.STUDY_CAPTURE_PROFILE || {
     id: "study-1280-10",
     targetWidth: 1280,
@@ -20,14 +23,18 @@
     recId: null,
     mime: "",
     recording: false,
+    finishing: false,
     audioTrack: false,
     audioDetected: false,
+    lastAudibleAt: null,
     startedAt: 0,
     timer: null,
     poll: null,
     heartbeat: null,
     pipeline: null,
     meterContext: null,
+    analyser: null,
+    meterData: null,
     captureReport: null,
   };
 
@@ -134,6 +141,8 @@
       state.meterContext.close().catch(() => {});
       state.meterContext = null;
     }
+    state.analyser = null;
+    state.meterData = null;
   }
 
   async function beat() {
@@ -198,6 +207,7 @@
 
   function setupMeter(stream) {
     state.audioDetected = false;
+    state.lastAudibleAt = null;
     $("signal-state").textContent = "No audible signal detected";
     const ctx = new AudioContext();
     state.meterContext = ctx;
@@ -205,25 +215,33 @@
     const analyser = ctx.createAnalyser();
     analyser.fftSize = 256;
     source.connect(analyser);
-    const data = new Uint8Array(analyser.frequencyBinCount);
+    state.analyser = analyser;
+    state.meterData = new Uint8Array(analyser.frequencyBinCount);
     const tick = () => {
-      if (!state.stream) {
+      if (!state.stream || state.meterContext !== ctx) {
         ctx.close().catch(() => {});
-        if (state.meterContext === ctx) state.meterContext = null;
         return;
       }
-      analyser.getByteFrequencyData(data);
-      let sum = 0;
-      for (let i = 0; i < data.length; i += 1) sum += data[i];
-      const avg = sum / data.length / 255;
-      $("level").style.width = `${Math.min(100, Math.round(avg * 180))}%`;
-      if (avg > 0.02) {
-        state.audioDetected = true;
-        $("signal-state").textContent = "Audible signal detected";
-      }
+      sampleAudioLevel();
       requestAnimationFrame(tick);
     };
     tick();
+  }
+
+  function sampleAudioLevel() {
+    if (!state.analyser || !state.meterData) return 0;
+    state.analyser.getByteFrequencyData(state.meterData);
+    const avg = averageFrequencyLevel
+      ? averageFrequencyLevel(state.meterData)
+      : 0;
+    const level = $("level");
+    if (level) level.style.width = `${Math.min(100, Math.round(avg * 180))}%`;
+    if (avg > 0.02) {
+      state.audioDetected = true;
+      if (state.recording) state.lastAudibleAt = Date.now();
+      $("signal-state").textContent = "Audible signal detected";
+    }
+    return avg;
   }
 
   let chooseOp = 0;
@@ -319,12 +337,30 @@
   };
 
   function clock() {
-    if (!state.recording) return;
+    if (!state.recording || state.finishing) return;
+    sampleAudioLevel();
     const s = Math.floor((Date.now() - state.startedAt) / 1000);
     const m = Math.floor(s / 60);
     $("clock").textContent = `Recording ${String(m).padStart(2, "0")}:${String(s % 60).padStart(2, "0")} — lead-in is part of this timeline`;
     const limit = Number($("limit").value);
-    if (limit > 0 && s >= limit * 60) requestFinish("max_duration");
+    if (limit > 0 && s >= limit * 60) {
+      requestFinish("max_duration");
+      return;
+    }
+    if (
+      trailingSilenceShouldStop &&
+      trailingSilenceShouldStop({
+        recording: state.recording,
+        finishing: state.finishing,
+        audioHeard: state.audioDetected,
+        lastAudibleAt: state.lastAudibleAt,
+        now: Date.now(),
+        thresholdMs: TRAILING_SILENCE_MS,
+      })
+    ) {
+      status("Tab audio has been quiet after the video. Stopping so screenshots do not continue on the ended screen.");
+      requestFinish("trailing_silence");
+    }
   }
 
   async function ensureSession() {
@@ -398,6 +434,10 @@
   }
 
   function requestFinish(reason) {
+    if (state.finishing || page.ended) {
+      return Promise.resolve();
+    }
+    state.finishing = true;
     const pipeline = state.pipeline;
     if (!pipeline) {
       return abortLocal(reason);
@@ -413,6 +453,7 @@
       state.recorder = null;
       return result;
     }).catch((err) => {
+      state.finishing = false;
       if (page.handleApiError(err)) return;
       status((err && err.message) || String(err));
       releasePreview();
@@ -464,6 +505,7 @@
 
   function afterFinish(result, reason) {
     state.recording = false;
+    state.finishing = false;
     $("stop").disabled = true;
     $("cancel").disabled = true;
     if (state.timer) clearInterval(state.timer);
@@ -471,7 +513,7 @@
     const process = result && result.process;
     if (process) {
       status("Saved. Transcribing and screenshots continue in the VSL Study window. Open the evidence from there when it finishes.");
-    } else if (reason === "user_stop" || reason === "max_duration") {
+    } else if (reason === "user_stop" || reason === "max_duration" || reason === "trailing_silence") {
       status((result && result.error && result.error.message) || "Partial recording saved. It was not treated as a complete VSL, so it was not analyzed automatically.");
       restoreChooser();
     } else {
@@ -528,6 +570,8 @@
       };
       rec.start(3000);
       state.recording = true;
+      state.finishing = false;
+      state.lastAudibleAt = null;
       state.startedAt = Date.now();
       $("start").disabled = true;
       $("choose").disabled = true;

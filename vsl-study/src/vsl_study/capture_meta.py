@@ -10,7 +10,7 @@ from pathlib import Path
 from typing import Any
 from urllib.parse import urlsplit, urlunsplit
 
-INTENTIONAL_STOPS = {"user_stop", "max_duration"}
+INTENTIONAL_STOPS = {"user_stop", "max_duration", "trailing_silence"}
 PROCESSABLE_STOPS = INTENTIONAL_STOPS
 CAPTURE_INPUT_TYPE = "browser_tab_recording"
 PUBLIC_CAPTURE_FIELDS = (

@@ -15,6 +15,7 @@ from urllib.parse import parse_qs, urlparse
 
 from vsl_study.cache import atomic_write_json
 from vsl_study.capture_meta import (
+    INTENTIONAL_STOPS,
     build_capture_record,
     sanitize_source_url,
     should_process,
@@ -524,7 +525,7 @@ class CaptureHandler(BaseHTTPRequestHandler):
             except RecordingInvalid as exc:
                 problems.append(str(exc))
                 audio_ok = False
-            complete = stop_reason in {"user_stop", "max_duration"} and audio_ok and not session.cancelled
+            complete = stop_reason in INTENTIONAL_STOPS and audio_ok and not session.cancelled
             record = build_capture_record(
                 recording_id=rec_id,
                 source_url=session.source_url,

@@ -13,6 +13,7 @@ These sampling numbers are **initial tuning values**, not proven optimal setting
 - OCR: up to 300 automatic images across the timeline. Duplicates are reused only when pixels are conservatively equivalent. The coarse 8×8 compact hash is not used as OCR identity. Standard OCR does not upscale to a 720-pixel shortest side.
 - Progress names the stage. Report HTML/Markdown can be opened when those files exist; ZIP packaging is a later, separate status.
 - `timings.json` records monotonic stage durations and cache hits.
+- If spoken content ends and the recording keeps going (Replay / ended screen), automatic screenshots stop about 30 seconds after the last real speech. The recorder also stops after about 3 minutes of silence once tab audio has been heard.
 
 Older `job.json` files keep their stored interval, screenshot policy, and transcription backend. Loading them does not silently adopt these defaults.
 

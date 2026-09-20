@@ -71,6 +71,30 @@ def test_image_end_ignores_untrusted_1000_fps():
     assert image_end_time(info) < 119.982
 
 
+def test_interval_candidates_stop_at_sampling_end():
+    info = _info(
+        Path("x.webm"),
+        duration_s=12134.0,
+        video_duration_s=12132.0,
+        fps_avg=1000.0,
+        fps_trusted=False,
+    )
+    scenes = [Scene("scene_0001", 0.0, info.duration_s)]
+    items = build_candidates(
+        info,
+        scenes,
+        interval=15.0,
+        scene_start_offset=0.25,
+        sampling_end=4278.0,
+        extra_times=[12000.0],
+    )
+    autos = [item for item in items if item.reason != "user"]
+    assert max(item.requested_time for item in autos) == pytest.approx(4278.0)
+    assert all(item.requested_time <= 4278.0 + 1e-6 for item in autos)
+    assert any(item.reason == "user" and item.requested_time == pytest.approx(12000.0) for item in items)
+    assert not any(item.reason != "user" and item.requested_time > 4300 for item in items)
+
+
 def test_efficient_extraction_decodes_once(tmp_path: Path):
     calls = []
 
